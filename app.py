@@ -33,8 +33,13 @@ st.markdown("""
 <style>
     .main { background: #0E1117; }
     .block-container { padding-top: 1rem; padding-bottom: 1rem; }
-    .stMetric { background: #1A1F2E; border-radius: 8px; padding: 10px; border-left: 3px solid #00FF88; }
+    .stMetric,
+    [data-testid="stMetric"] { background: #1A1F2E; border-radius: 8px; padding: 10px; border-left: 3px solid #00FF88; }
     .stMetric label { color: #AAB4C8 !important; font-size: 0.75rem; }
+    [data-testid="stMetricLabel"] p { color: #AAB4C8 !important; font-size: 0.75rem !important; }
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] div { color: #FAFAFA !important; }
+    [data-testid="stMetricDelta"] { color: #AAB4C8 !important; }
     .bull-badge { background: #003D1A; color: #00FF88; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .bear-badge { background: #3D0000; color: #FF4444; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .neutral-badge { background: #2A2A1A; color: #FFD700; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
