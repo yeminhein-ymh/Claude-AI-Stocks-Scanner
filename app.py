@@ -144,7 +144,7 @@ TICKER = st.session_state.selected_ticker
 
 # ─── Main Header ────────────────────────────────────────────────────────────
 info = get_stock_info(TICKER)
-chg_color = "#00FF88" if info["change_pct"] >= 0 else "#FF4444"
+chg_color = "#0F7A45" if info["change_pct"] >= 0 else "#FF4444"
 chg_sign  = "+" if info["change_pct"] >= 0 else ""
 
 col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
@@ -227,7 +227,7 @@ with tabs[0]:
 
             def _color_class(val):
                 colors = {
-                    "Strong Buy": "#00FF88", "Buy": "#22A85B", "Momentum Leader": "#00CED1",
+                    "Strong Buy": "#0F7A45", "Buy": "#22A85B", "Momentum Leader": "#00CED1",
                     "Breakout Candidate": "#1E90FF", "Watchlist": "#B8860B", "Neutral": "#5B6B82",
                     "Mean Reversion Candidate": "#FFA500", "High Risk": "#FF8C00",
                     "Short Candidate": "#E53935", "Avoid": "#FF4444",
@@ -238,7 +238,7 @@ with tabs[0]:
                 try:
                     v = float(val)
                     if v >= 65:
-                        return "color: #00FF88"
+                        return "color: #0F7A45"
                     if v <= 35:
                         return "color: #FF4444"
                     return "color: #B8860B"
@@ -246,8 +246,14 @@ with tabs[0]:
                     return ""
 
             score_cols = ["AI Score", "Trend", "Momentum", "Volume", "RS", "Fund", "Flow", "ML", "Confidence"]
+            fmt_scan = {c: "{:.1f}" for c in score_cols}
+            fmt_scan.update({
+                "Bull %": "{:.1f}%", "Bear %": "{:.1f}%", "Sideways %": "{:.1f}%",
+                "Risk": "{:.1f}", "Exp Return %": "{:+.2f}%", "R:R": "{:.2f}",
+            })
             st.dataframe(
-                df_scan.style.map(_color_class, subset=["Class"]).map(_color_score, subset=score_cols),
+                df_scan.style.map(_color_class, subset=["Class"]).map(_color_score, subset=score_cols)
+                       .format(fmt_scan),
                 use_container_width=True, height=min(80 + 35 * len(df_scan), 500),
             )
 
@@ -358,12 +364,12 @@ with tabs[1]:
     def color_change(val):
         try:
             v = float(val)
-            return "color: #00FF88" if v >= 0 else "color: #FF4444"
+            return "color: #0F7A45" if v >= 0 else "color: #FF4444"
         except Exception:
             return ""
 
     st.dataframe(
-        df_watch.style.map(color_change, subset=["Change %"]),
+        df_watch.style.map(color_change, subset=["Change %"]).format({"Change %": "{:+.2f}%"}),
         use_container_width=True, height=300,
     )
 
@@ -582,6 +588,12 @@ with tabs[3]:
         disp_cols = ["strike", "lastPrice", "bid", "ask", "volume", "openInterest",
                      "IV %", "delta", "gamma", "theta", "vega"]
 
+        chain_fmt = {
+            "Strike": "{:.2f}", "Last": "{:.2f}", "bid": "{:.2f}", "ask": "{:.2f}",
+            "Volume": "{:.0f}", "OI": "{:.0f}", "IV %": "{:.1f}%",
+            "delta": "{:.4f}", "gamma": "{:.6f}", "theta": "{:.4f}", "vega": "{:.4f}",
+        }
+
         tab_c, tab_p = st.tabs(["📗 Calls", "📕 Puts"])
         with tab_c:
             calls_disp = calls[[c for c in disp_cols if c in calls.columns]].copy()
@@ -591,11 +603,11 @@ with tabs[3]:
             })
 
             def highlight_itm_call(row):
-                return ["background-color: rgba(0,100,50,0.3)" if row.get("Strike", 0) < spot
+                return ["background-color: rgba(0,150,80,0.15)" if row.get("Strike", 0) < spot
                         else "" for _ in row]
 
             st.dataframe(
-                calls_disp.style.apply(highlight_itm_call, axis=1),
+                calls_disp.style.apply(highlight_itm_call, axis=1).format(chain_fmt),
                 use_container_width=True, height=400,
             )
 
@@ -607,11 +619,11 @@ with tabs[3]:
             })
 
             def highlight_itm_put(row):
-                return ["background-color: rgba(100,0,0,0.3)" if row.get("Strike", 999) > spot
+                return ["background-color: rgba(200,50,50,0.15)" if row.get("Strike", 999) > spot
                         else "" for _ in row]
 
             st.dataframe(
-                puts_disp.style.apply(highlight_itm_put, axis=1),
+                puts_disp.style.apply(highlight_itm_put, axis=1).format(chain_fmt),
                 use_container_width=True, height=400,
             )
 
@@ -679,13 +691,13 @@ with tabs[4]:
 
             def color_sentiment(row):
                 if row["Sentiment"] == "Bullish":
-                    return ["color: #00FF88"] * len(row)
+                    return ["color: #0F7A45"] * len(row)
                 elif row["Sentiment"] == "Bearish":
                     return ["color: #FF4444"] * len(row)
                 return [""] * len(row)
 
             st.dataframe(
-                df_uu.style.apply(color_sentiment, axis=1),
+                df_uu.style.apply(color_sentiment, axis=1).format({"Strike": "{:.2f}", "Vol/OI": "{:.1f}"}),
                 use_container_width=True, height=450,
             )
 
@@ -717,7 +729,14 @@ with tabs[4]:
                 "PCR OI":      pcr_e["pcr_oi"],
                 "Bias":        "Bearish" if pcr_e["pcr_volume"] > 1 else "Bullish",
             })
-        st.dataframe(pd.DataFrame(flow_rows), use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(flow_rows),
+            use_container_width=True,
+            column_config={
+                "PCR Vol": st.column_config.NumberColumn(format="%.3f"),
+                "PCR OI":  st.column_config.NumberColumn(format="%.3f"),
+            },
+        )
 
 # ═══════════════════════════════════════════════════════════
 # TAB 5 — AI SIGNALS
@@ -735,7 +754,7 @@ with tabs[5]:
                     "accuracy": 0, "expected_move_pct": 0, "signal": "N/A",
                     "trend_strength": 50}
 
-    sig_color = ("#00FF88" if "BUY" in pred["signal"] else
+    sig_color = ("#0F7A45" if "BUY" in pred["signal"] else
                  "#FF4444" if "SELL" in pred["signal"] else "#B8860B")
 
     st.markdown(
@@ -945,7 +964,7 @@ with tabs[7]:
             st.subheader("Sector Rankings")
             sec_sorted = sec_df.sort_values("1D %", ascending=False).reset_index(drop=True)
             for _, row in sec_sorted.iterrows():
-                color = "#00FF88" if row["1D %"] >= 0 else "#FF4444"
+                color = "#0F7A45" if row["1D %"] >= 0 else "#FF4444"
                 st.markdown(
                     f"<div style='display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #C7D3E0'>"
                     f"<span>{row['Sector']} ({row['ETF']})</span>"
