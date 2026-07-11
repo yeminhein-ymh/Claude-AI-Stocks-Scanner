@@ -22,7 +22,7 @@ from modules.scoring_engine import run_scan
 
 # ─── Page Config ────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Options Trading Dashboard",
+    page_title="Claude AI Stocks Scanner",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -39,7 +39,27 @@ st.markdown("""
     .bear-badge { background: #3D0000; color: #FF4444; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .neutral-badge { background: #2A2A1A; color: #FFD700; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .signal-card { background: #1A1F2E; border-radius: 10px; padding: 12px; margin: 4px 0; }
-    div[data-testid="stSidebarContent"] { background: #141921; }
+    div[data-testid="stSidebarContent"] { background: #EAF0F7 !important; }
+    div[data-testid="stSidebarContent"] h1,
+    div[data-testid="stSidebarContent"] h2,
+    div[data-testid="stSidebarContent"] h3 { color: #1A2333 !important; }
+    div[data-testid="stSidebarContent"] [data-testid="stMarkdownContainer"],
+    div[data-testid="stSidebarContent"] [data-testid="stWidgetLabel"],
+    div[data-testid="stSidebarContent"] [data-testid="stCaptionContainer"] { color: #2D3A4D !important; }
+    div[data-testid="stSidebarContent"] hr { border-color: #C7D3E0; }
+    div[data-testid="stSidebarContent"] button {
+        background: #FFFFFF !important;
+        color: #1A2333 !important;
+        border: 1px solid #C7D3E0 !important;
+    }
+    div[data-testid="stSidebarContent"] input,
+    div[data-testid="stSidebarContent"] textarea,
+    div[data-testid="stSidebarContent"] [data-baseweb="select"] > div,
+    div[data-testid="stSidebarContent"] [data-baseweb="base-input"] {
+        background: #FFFFFF !important;
+        color: #1A2333 !important;
+        border-color: #C7D3E0 !important;
+    }
     .stTabs [data-baseweb="tab-list"] { background: #141921; }
     .stTabs [data-baseweb="tab"] { color: #AAB4C8; }
     .stTabs [aria-selected="true"] { color: #00FF88 !important; border-bottom: 2px solid #00FF88; }
@@ -59,7 +79,7 @@ if "last_refresh" not in st.session_state:
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 📊 Options Dashboard")
+    st.markdown("## 📊 Claude AI Stocks Scanner")
     st.markdown("---")
 
     # Auto-refresh
@@ -961,7 +981,7 @@ with tabs[8]:
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center;color:#4A5568;font-size:0.75rem'>"
-    "Options Trading Dashboard · Data via Yahoo Finance · For educational use only · "
+    "Claude AI Stocks Scanner · Data via Yahoo Finance · For educational use only · "
     "Not financial advice</p>",
     unsafe_allow_html=True,
 )
