@@ -31,19 +31,19 @@ st.set_page_config(
 # ─── Custom CSS ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background: #0E1117; }
+    .main { background: #F5F8FC; }
     .block-container { padding-top: 1rem; padding-bottom: 1rem; }
     .stMetric,
-    [data-testid="stMetric"] { background: #1A1F2E; border-radius: 8px; padding: 10px; border-left: 3px solid #00FF88; }
-    .stMetric label { color: #AAB4C8 !important; font-size: 0.75rem; }
-    [data-testid="stMetricLabel"] p { color: #AAB4C8 !important; font-size: 0.75rem !important; }
+    [data-testid="stMetric"] { background: #FFFFFF; border-radius: 8px; padding: 10px; border-left: 3px solid #00A86B; box-shadow: 0 1px 3px rgba(26,35,51,0.08); }
+    .stMetric label { color: #5B6B82 !important; font-size: 0.75rem; }
+    [data-testid="stMetricLabel"] p { color: #5B6B82 !important; font-size: 0.75rem !important; }
     [data-testid="stMetricValue"],
-    [data-testid="stMetricValue"] div { color: #FAFAFA !important; }
-    [data-testid="stMetricDelta"] { color: #AAB4C8 !important; }
-    .bull-badge { background: #003D1A; color: #00FF88; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
-    .bear-badge { background: #3D0000; color: #FF4444; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
-    .neutral-badge { background: #2A2A1A; color: #FFD700; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
-    .signal-card { background: #1A1F2E; border-radius: 10px; padding: 12px; margin: 4px 0; }
+    [data-testid="stMetricValue"] div { color: #1A2333 !important; }
+    [data-testid="stMetricDelta"] { color: #5B6B82 !important; }
+    .bull-badge { background: #E6F7EE; color: #0F7A45; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
+    .bear-badge { background: #FBEAEA; color: #C62828; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
+    .neutral-badge { background: #FDF3DA; color: #92720F; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
+    .signal-card { background: #FFFFFF; border-radius: 10px; padding: 12px; margin: 4px 0; box-shadow: 0 1px 3px rgba(26,35,51,0.08); }
     div[data-testid="stSidebarContent"] { background: #EAF0F7 !important; }
     div[data-testid="stSidebarContent"] h1,
     div[data-testid="stSidebarContent"] h2,
@@ -65,12 +65,14 @@ st.markdown("""
         color: #1A2333 !important;
         border-color: #C7D3E0 !important;
     }
-    .stTabs [data-baseweb="tab-list"] { background: #141921; }
-    .stTabs [data-baseweb="tab"] { color: #AAB4C8; }
-    .stTabs [aria-selected="true"] { color: #00FF88 !important; border-bottom: 2px solid #00FF88; }
-    h1, h2, h3 { color: #FAFAFA; }
-    .stDataFrame { background: #1A1F2E; }
-    hr { border-color: #2A3040; }
+    .stTabs [data-baseweb="tab-list"] { background: #E4EAF1; }
+    .stTabs [data-baseweb="tab"] { color: #5B6B82; }
+    .stTabs [data-baseweb="tab"] p { color: #5B6B82 !important; }
+    .stTabs [aria-selected="true"] { color: #0F7A45 !important; border-bottom: 2px solid #0F7A45; }
+    .stTabs [aria-selected="true"] p { color: #0F7A45 !important; }
+    h1, h2, h3 { color: #1A2333; }
+    .stDataFrame { background: #FFFFFF; }
+    hr { border-color: #C7D3E0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -149,7 +151,7 @@ col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
 with col_h1:
     st.markdown(
         f"## {info['name']} &nbsp; "
-        f"<span style='color:#FAFAFA;font-size:1.6rem'>${info['price']}</span> &nbsp;"
+        f"<span style='color:#1A2333;font-size:1.6rem'>${info['price']}</span> &nbsp;"
         f"<span style='color:{chg_color};font-size:1.2rem'>{chg_sign}{info['change_pct']}%</span>",
         unsafe_allow_html=True,
     )
@@ -225,12 +227,12 @@ with tabs[0]:
 
             def _color_class(val):
                 colors = {
-                    "Strong Buy": "#00FF88", "Buy": "#66FF99", "Momentum Leader": "#00CED1",
-                    "Breakout Candidate": "#1E90FF", "Watchlist": "#FFD700", "Neutral": "#AAB4C8",
+                    "Strong Buy": "#00FF88", "Buy": "#22A85B", "Momentum Leader": "#00CED1",
+                    "Breakout Candidate": "#1E90FF", "Watchlist": "#B8860B", "Neutral": "#5B6B82",
                     "Mean Reversion Candidate": "#FFA500", "High Risk": "#FF8C00",
-                    "Short Candidate": "#FF6B6B", "Avoid": "#FF4444",
+                    "Short Candidate": "#E53935", "Avoid": "#FF4444",
                 }
-                return f"color: {colors.get(val, '#FAFAFA')}; font-weight: bold"
+                return f"color: {colors.get(val, '#1A2333')}; font-weight: bold"
 
             def _color_score(val):
                 try:
@@ -239,7 +241,7 @@ with tabs[0]:
                         return "color: #00FF88"
                     if v <= 35:
                         return "color: #FF4444"
-                    return "color: #FFD700"
+                    return "color: #B8860B"
                 except Exception:
                     return ""
 
@@ -466,7 +468,7 @@ with tabs[2]:
         # Fibonacci
         if show_fib:
             fib = get_fibonacci_levels(df)
-            fib_colors = ["#FF4444", "#FF8C00", "#FFD700", "#00CED1", "#1E90FF", "#9370DB", "#00FF88"]
+            fib_colors = ["#FF4444", "#FF8C00", "#B8860B", "#00CED1", "#1E90FF", "#9370DB", "#00A86B"]
             for (label, level), color in zip(fib.items(), fib_colors):
                 fig.add_hline(y=level, line=dict(color=color, width=0.8, dash="dash"),
                               annotation_text=f"Fib {label}", annotation_position="right",
@@ -488,7 +490,7 @@ with tabs[2]:
         if show_rsi and "RSI" in df.columns:
             fig.add_trace(go.Scatter(
                 x=df.index, y=df["RSI"], name="RSI",
-                line=dict(color="#FFD700", width=1.5),
+                line=dict(color="#B8860B", width=1.5),
             ), row=cur_row, col=1)
             fig.add_hline(y=70, line=dict(color="#FF4444", dash="dash", width=0.8),
                           row=cur_row, col=1)
@@ -514,12 +516,12 @@ with tabs[2]:
             ), row=cur_row, col=1)
 
         fig.update_layout(
-            height=750, template="plotly_dark",
-            paper_bgcolor="#0E1117", plot_bgcolor="#0E1117",
+            height=750, template="plotly_white",
+            paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC",
             showlegend=True, xaxis_rangeslider_visible=False,
             margin=dict(l=0, r=0, t=30, b=0),
             legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
-            font=dict(color="#FAFAFA"),
+            font=dict(color="#1A2333"),
         )
         fig.update_xaxes(showgrid=True, gridcolor="#1F2937", showspikes=True)
         fig.update_yaxes(showgrid=True, gridcolor="#1F2937")
@@ -627,10 +629,10 @@ with tabs[3]:
             fig_oi.add_trace(go.Bar(x=strikes, y=-put_oi, name="Put OI",
                                     marker_color="rgba(255,68,68,0.7)"))
             fig_oi.add_vline(x=spot,     line=dict(color="white",  dash="dash"), annotation_text="Spot")
-            fig_oi.add_vline(x=max_pain, line=dict(color="#FFD700", dash="dot"),  annotation_text="Max Pain")
+            fig_oi.add_vline(x=max_pain, line=dict(color="#B8860B", dash="dot"),  annotation_text="Max Pain")
             fig_oi.update_layout(
-                height=350, template="plotly_dark",
-                barmode="overlay", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117",
+                height=350, template="plotly_white",
+                barmode="overlay", paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC",
                 title="Call (green) vs Put (red) Open Interest",
             )
             st.plotly_chart(fig_oi, use_container_width=True)
@@ -692,9 +694,9 @@ with tabs[4]:
                 df_uu, x="OI", y="Vol", color="Sentiment", size="Score",
                 hover_data=["Strike", "Type", "Premium", "Expiry"],
                 color_discrete_map={"Bullish": "#00FF88", "Bearish": "#FF4444"},
-                template="plotly_dark", title="Volume vs Open Interest (Unusual Activity)",
+                template="plotly_white", title="Volume vs Open Interest (Unusual Activity)",
             )
-            fig_sc.update_layout(paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", height=350)
+            fig_sc.update_layout(paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC", height=350)
             st.plotly_chart(fig_sc, use_container_width=True)
 
         else:
@@ -734,13 +736,13 @@ with tabs[5]:
                     "trend_strength": 50}
 
     sig_color = ("#00FF88" if "BUY" in pred["signal"] else
-                 "#FF4444" if "SELL" in pred["signal"] else "#FFD700")
+                 "#FF4444" if "SELL" in pred["signal"] else "#B8860B")
 
     st.markdown(
         f"<h2 style='color:{sig_color};text-align:center'>{pred['signal']}</h2>",
         unsafe_allow_html=True,
     )
-    st.markdown(f"<p style='text-align:center;color:#AAB4C8'>Model Accuracy: {pred['accuracy']}%</p>",
+    st.markdown(f"<p style='text-align:center;color:#5B6B82'>Model Accuracy: {pred['accuracy']}%</p>",
                 unsafe_allow_html=True)
 
     st.divider()
@@ -757,22 +759,22 @@ with tabs[5]:
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number+delta",
             value=pred["bullish_prob"],
-            title={"text": "Bullish Probability %", "font": {"color": "#FAFAFA"}},
+            title={"text": "Bullish Probability %", "font": {"color": "#1A2333"}},
             delta={"reference": 50},
             gauge={
-                "axis": {"range": [0, 100], "tickcolor": "#FAFAFA"},
+                "axis": {"range": [0, 100], "tickcolor": "#1A2333"},
                 "bar":  {"color": "#00FF88" if pred["bullish_prob"] > 50 else "#FF4444"},
                 "steps": [
-                    {"range": [0, 40],   "color": "#3D0000"},
-                    {"range": [40, 60],  "color": "#2A2A1A"},
-                    {"range": [60, 100], "color": "#003D1A"},
+                    {"range": [0, 40],   "color": "#FDEAEA"},
+                    {"range": [40, 60],  "color": "#F0F2F5"},
+                    {"range": [60, 100], "color": "#E6F7EE"},
                 ],
                 "threshold": {"line": {"color": "white", "width": 2}, "value": 50},
             },
         ))
         fig_gauge.update_layout(
-            height=280, paper_bgcolor="#0E1117",
-            font={"color": "#FAFAFA"},
+            height=280, paper_bgcolor="#F5F8FC",
+            font={"color": "#1A2333"},
         )
         st.plotly_chart(fig_gauge, use_container_width=True)
 
@@ -781,20 +783,20 @@ with tabs[5]:
         fig_trend = go.Figure(go.Indicator(
             mode="gauge+number",
             value=pred["trend_strength"],
-            title={"text": "Trend Strength (EMA Alignment %)", "font": {"color": "#FAFAFA"}},
+            title={"text": "Trend Strength (EMA Alignment %)", "font": {"color": "#1A2333"}},
             gauge={
-                "axis": {"range": [0, 100], "tickcolor": "#FAFAFA"},
+                "axis": {"range": [0, 100], "tickcolor": "#1A2333"},
                 "bar":  {"color": "#00BFFF"},
                 "steps": [
-                    {"range": [0, 33],  "color": "#1A1F2E"},
-                    {"range": [33, 66], "color": "#1A2030"},
-                    {"range": [66, 100],"color": "#1A2840"},
+                    {"range": [0, 33],  "color": "#F5F8FC"},
+                    {"range": [33, 66], "color": "#DCE8F5"},
+                    {"range": [66, 100],"color": "#BFD6ED"},
                 ],
             },
         ))
         fig_trend.update_layout(
-            height=280, paper_bgcolor="#0E1117",
-            font={"color": "#FAFAFA"},
+            height=280, paper_bgcolor="#F5F8FC",
+            font={"color": "#1A2333"},
         )
         st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -805,8 +807,8 @@ with tabs[5]:
         feat_df = pd.DataFrame(pred["top_features"], columns=["Feature", "Importance %"])
         fig_fi = px.bar(feat_df, x="Importance %", y="Feature", orientation="h",
                         color="Importance %", color_continuous_scale="Viridis",
-                        template="plotly_dark")
-        fig_fi.update_layout(paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", height=250)
+                        template="plotly_white")
+        fig_fi.update_layout(paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC", height=250)
         st.plotly_chart(fig_fi, use_container_width=True)
 
     # Historical probability chart
@@ -817,11 +819,11 @@ with tabs[5]:
         fig_hist.add_trace(go.Scatter(x=df_ai.index, y=df_ai["Close"],
                                       name="Close", line=dict(color="#00FF88", width=1.5)))
         fig_hist.add_trace(go.Scatter(x=df_ai.index, y=df_ai["EMA_20"],
-                                      name="EMA 20", line=dict(color="#FFD700", width=1)))
+                                      name="EMA 20", line=dict(color="#B8860B", width=1)))
         fig_hist.add_trace(go.Scatter(x=df_ai.index, y=df_ai["EMA_50"],
                                       name="EMA 50", line=dict(color="#00BFFF", width=1)))
-        fig_hist.update_layout(height=300, template="plotly_dark",
-                               paper_bgcolor="#0E1117", plot_bgcolor="#0E1117",
+        fig_hist.update_layout(height=300, template="plotly_white",
+                               paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC",
                                margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -854,7 +856,7 @@ with tabs[6]:
                     <div class="signal-card">
                       <span class="{badge}">{sig['type']}</span><br>
                       <b>{sig['signal']}</b><br>
-                      <span style="color:#AAB4C8">@ ${sig['price']:.2f} · {sig['strength']}</span>
+                      <span style="color:#5B6B82">@ ${sig['price']:.2f} · {sig['strength']}</span>
                     </div>
                     """, unsafe_allow_html=True)
         else:
@@ -908,8 +910,8 @@ with tabs[6]:
         fig_scal.add_trace(go.Bar(x=df_plot.index, y=df_plot["Volume"],
                                    marker_color=v_colors, showlegend=False),
                             row=2, col=1)
-        fig_scal.update_layout(height=500, template="plotly_dark",
-                                paper_bgcolor="#0E1117", plot_bgcolor="#0E1117",
+        fig_scal.update_layout(height=500, template="plotly_white",
+                                paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC",
                                 xaxis_rangeslider_visible=False,
                                 margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig_scal, use_container_width=True)
@@ -935,8 +937,8 @@ with tabs[7]:
             )
             fig_tree.update_traces(textinfo="label+text",
                                    text=[f"{r['ETF']}<br>{r['1D %']:+.2f}%" for _, r in sec_df.iterrows()])
-            fig_tree.update_layout(height=450, paper_bgcolor="#0E1117",
-                                   font=dict(color="#FAFAFA"))
+            fig_tree.update_layout(height=450, paper_bgcolor="#F5F8FC",
+                                   font=dict(color="#1A2333"))
             st.plotly_chart(fig_tree, use_container_width=True)
 
         with c2:
@@ -945,7 +947,7 @@ with tabs[7]:
             for _, row in sec_sorted.iterrows():
                 color = "#00FF88" if row["1D %"] >= 0 else "#FF4444"
                 st.markdown(
-                    f"<div style='display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #2A3040'>"
+                    f"<div style='display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #C7D3E0'>"
                     f"<span>{row['Sector']} ({row['ETF']})</span>"
                     f"<span style='color:{color};font-weight:bold'>{row['1D %']:+.2f}%</span></div>",
                     unsafe_allow_html=True,
@@ -957,9 +959,9 @@ with tabs[7]:
             sec_df.sort_values("5D %"), x="5D %", y="Sector", orientation="h",
             color="5D %", color_continuous_scale=["#FF4444", "#333333", "#00FF88"],
             color_continuous_midpoint=0,
-            template="plotly_dark",
+            template="plotly_white",
         )
-        fig_bar.update_layout(paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", height=350)
+        fig_bar.update_layout(paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC", height=350)
         st.plotly_chart(fig_bar, use_container_width=True)
 
     st.divider()
@@ -971,9 +973,9 @@ with tabs[7]:
     rs_df = pd.DataFrame(rs_rows).sort_values("Change %", ascending=False)
     fig_rs = px.bar(rs_df, x="Ticker", y="Change %", color="Change %",
                     color_continuous_scale=["#FF4444", "#333333", "#00FF88"],
-                    color_continuous_midpoint=0, template="plotly_dark",
+                    color_continuous_midpoint=0, template="plotly_white",
                     title="Watchlist Daily Performance")
-    fig_rs.update_layout(paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", height=300)
+    fig_rs.update_layout(paper_bgcolor="#F5F8FC", plot_bgcolor="#F5F8FC", height=300)
     st.plotly_chart(fig_rs, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════

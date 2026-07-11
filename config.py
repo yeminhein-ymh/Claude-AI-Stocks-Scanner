@@ -54,7 +54,7 @@ SECTOR_NAME_MAP = {
     "Consumer Staples":       "Consumer Staples",
 }
 
-EMA_COLORS   = {9: "#FF6B35", 20: "#FFD700", 50: "#00BFFF", 200: "#FF69B4"}
+EMA_COLORS   = {9: "#FF6B35", 20: "#B8860B", 50: "#00BFFF", 200: "#FF69B4"}
 CANDLE_UP    = "#00FF88"
 CANDLE_DOWN  = "#FF4444"
 VOL_UP       = "rgba(0,255,136,0.6)"
