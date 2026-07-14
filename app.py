@@ -38,8 +38,22 @@ st.markdown("""
     .stMetric label { color: #5B6B82 !important; font-size: 0.75rem; }
     [data-testid="stMetricLabel"] p { color: #5B6B82 !important; font-size: 0.75rem !important; }
     [data-testid="stMetricValue"],
-    [data-testid="stMetricValue"] div { color: #1A2333 !important; }
-    [data-testid="stMetricDelta"] { color: #5B6B82 !important; }
+    [data-testid="stMetricValue"] div {
+        color: #1A2333 !important;
+        font-size: 1.25rem !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+        word-break: break-word;
+        line-height: 1.25 !important;
+    }
+    [data-testid="stMetricDelta"] {
+        color: #5B6B82 !important;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: unset !important;
+    }
+    [data-testid="stMetricDelta"] div { white-space: normal !important; overflow: visible !important; }
     .bull-badge { background: #E6F7EE; color: #0F7A45; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .bear-badge { background: #FBEAEA; color: #C62828; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
     .neutral-badge { background: #FDF3DA; color: #92720F; padding: 3px 10px; border-radius: 12px; font-weight: bold; font-size: 0.8rem; }
