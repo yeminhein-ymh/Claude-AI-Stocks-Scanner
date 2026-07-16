@@ -5,8 +5,37 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 import time
+import json
+import os
 
 import config
+
+WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.json")
+MAX_WATCHLIST_SIZE = 30
+
+
+def _load_watchlist_state():
+    try:
+        with open(WATCHLIST_FILE, "r") as f:
+            data = json.load(f)
+        tickers = [t for t in data.get("tickers", []) if t][:MAX_WATCHLIST_SIZE]
+        if tickers:
+            selected = data.get("selected")
+            return tickers, selected if selected in tickers else tickers[0]
+    except (OSError, ValueError):
+        pass
+    return config.DEFAULT_TICKERS.copy(), config.DEFAULT_TICKERS[0]
+
+
+def _save_watchlist_state():
+    try:
+        with open(WATCHLIST_FILE, "w") as f:
+            json.dump({
+                "tickers": st.session_state.watchlist,
+                "selected": st.session_state.selected_ticker,
+            }, f)
+    except OSError:
+        pass
 from modules.data_fetcher import (
     get_stock_info, get_ohlcv, get_options_chain, get_macro_data,
     get_sector_data, get_current_price,
@@ -92,9 +121,7 @@ st.markdown("""
 
 # ─── Session State Init ──────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = config.DEFAULT_TICKERS.copy()
-if "selected_ticker" not in st.session_state:
-    st.session_state.selected_ticker = config.DEFAULT_TICKERS[0]
+    st.session_state.watchlist, st.session_state.selected_ticker = _load_watchlist_state()
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
@@ -112,12 +139,16 @@ with st.sidebar:
             st.rerun()
         st.caption(f"Next refresh in {max(0, 60 - int(elapsed))}s")
 
-    st.markdown("### 📋 Watchlist")
+    st.markdown(f"### 📋 Watchlist ({len(st.session_state.watchlist)}/{MAX_WATCHLIST_SIZE})")
     new_ticker = st.text_input("Add Ticker", placeholder="e.g. AAPL").upper().strip()
     if st.button("➕ Add", use_container_width=True) and new_ticker:
         if new_ticker not in st.session_state.watchlist:
-            st.session_state.watchlist.append(new_ticker)
-            st.success(f"Added {new_ticker}")
+            if len(st.session_state.watchlist) >= MAX_WATCHLIST_SIZE:
+                st.warning(f"Watchlist is full (max {MAX_WATCHLIST_SIZE}). Remove a ticker first.")
+            else:
+                st.session_state.watchlist.append(new_ticker)
+                _save_watchlist_state()
+                st.rerun()
         else:
             st.warning(f"{new_ticker} already in watchlist")
 
@@ -130,12 +161,14 @@ with st.sidebar:
             key=f"sel_{tk}", use_container_width=True
         ):
             st.session_state.selected_ticker = tk
+            _save_watchlist_state()
         if c2.button("✕", key=f"del_{tk}"):
             to_remove = tk
     if to_remove and len(st.session_state.watchlist) > 1:
         st.session_state.watchlist.remove(to_remove)
         if st.session_state.selected_ticker == to_remove:
             st.session_state.selected_ticker = st.session_state.watchlist[0]
+        _save_watchlist_state()
         st.rerun()
 
     st.markdown("---")
@@ -238,6 +271,7 @@ with tabs[0]:
                     "Trend Stage":  r["trend_stage"],
                 })
             df_scan = pd.DataFrame(table_rows).sort_values("AI Score", ascending=False).reset_index(drop=True)
+            df_scan.index += 1
 
             def _color_class(val):
                 colors = {
@@ -374,6 +408,7 @@ with tabs[1]:
             })
 
     df_watch = pd.DataFrame(rows)
+    df_watch.index += 1
 
     def color_change(val):
         try:
