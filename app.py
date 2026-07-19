@@ -60,11 +60,6 @@ st.set_page_config(
 # ─── Custom CSS ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"], .stApp, .stMarkdown, .stMetric, .stButton, .stDataFrame,
-    .stTabs, input, textarea, select, button {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
-    }
     .main { background: #F5F8FC; }
     .block-container { padding-top: 1rem; padding-bottom: 1rem; }
     .stMetric,
