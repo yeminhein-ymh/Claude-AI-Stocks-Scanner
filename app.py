@@ -194,26 +194,8 @@ with st.sidebar:
 
 TICKER = st.session_state.selected_ticker
 
-# ─── Main Header ────────────────────────────────────────────────────────────
+# Ticker data (used across tabs, e.g. Options Chain spot price) — no header display
 info = get_stock_info(TICKER)
-chg_color = "#0F7A45" if info["change_pct"] >= 0 else "#FF4444"
-chg_sign  = "+" if info["change_pct"] >= 0 else ""
-
-col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
-with col_h1:
-    st.markdown(
-        f"## {TICKER} &nbsp; "
-        f"<span style='color:#1A2333;font-size:1.6rem'>${info['price']}</span> &nbsp;"
-        f"<span style='color:{chg_color};font-size:1.2rem'>{chg_sign}{info['change_pct']}%</span>",
-        unsafe_allow_html=True,
-    )
-with col_h2:
-    st.caption("Sector")
-    st.write(info["sector"] or "N/A")
-with col_h3:
-    if st.button("🔄 Refresh Now", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
