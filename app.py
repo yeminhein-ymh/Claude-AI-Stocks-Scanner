@@ -61,7 +61,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main { background: #F5F8FC; }
-    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    .block-container { padding-top: 5rem; padding-bottom: 1rem; }
     .stMetric,
     [data-testid="stMetric"] { background: #FFFFFF; border-radius: 8px; padding: 10px; border-left: 3px solid #00A86B; box-shadow: 0 1px 3px rgba(26,35,51,0.08); }
     .stMetric label { color: #5B6B82 !important; font-size: 0.75rem; }
