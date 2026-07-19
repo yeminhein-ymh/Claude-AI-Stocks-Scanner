@@ -15,6 +15,19 @@ MAX_WATCHLIST_SIZE = 30
 
 
 def _load_watchlist_state():
+    # URL query params first — survives redeploys/restarts since it lives in the
+    # browser's address bar, not server-side storage that gets wiped on redeploy.
+    try:
+        qp_tickers = st.query_params.get("tickers", "")
+    except Exception:
+        qp_tickers = ""
+    if qp_tickers:
+        tickers = [t.strip().upper() for t in qp_tickers.split(",") if t.strip()][:MAX_WATCHLIST_SIZE]
+        if tickers:
+            selected = st.query_params.get("selected", tickers[0])
+            return tickers, selected if selected in tickers else tickers[0]
+
+    # Fall back to the local file (covers same-deploy reloads before a URL exists yet)
     try:
         with open(WATCHLIST_FILE, "r") as f:
             data = json.load(f)
@@ -24,16 +37,23 @@ def _load_watchlist_state():
             return tickers, selected if selected in tickers else tickers[0]
     except (OSError, ValueError):
         pass
+
     return config.DEFAULT_TICKERS.copy(), config.DEFAULT_TICKERS[0]
 
 
 def _save_watchlist_state():
+    tickers = st.session_state.watchlist
+    selected = st.session_state.selected_ticker
+    # URL query params — the durable copy, immune to redeploys
+    try:
+        st.query_params["tickers"] = ",".join(tickers)
+        st.query_params["selected"] = selected
+    except Exception:
+        pass
+    # Local file — convenience fallback within the same running instance
     try:
         with open(WATCHLIST_FILE, "w") as f:
-            json.dump({
-                "tickers": st.session_state.watchlist,
-                "selected": st.session_state.selected_ticker,
-            }, f)
+            json.dump({"tickers": tickers, "selected": selected}, f)
     except OSError:
         pass
 from modules.data_fetcher import (
@@ -122,6 +142,7 @@ st.markdown("""
 # ─── Session State Init ──────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
     st.session_state.watchlist, st.session_state.selected_ticker = _load_watchlist_state()
+    _save_watchlist_state()  # stamp the URL immediately so a fresh visit is bookmarkable right away
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
