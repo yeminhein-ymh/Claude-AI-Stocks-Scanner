@@ -60,6 +60,11 @@ st.set_page_config(
 # ─── Custom CSS ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    html, body, [class*="css"], .stApp, .stMarkdown, .stMetric, .stButton, .stDataFrame,
+    .stTabs, input, textarea, select, button {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    }
     .main { background: #F5F8FC; }
     .block-container { padding-top: 1rem; padding-bottom: 1rem; }
     .stMetric,
@@ -157,7 +162,7 @@ with st.sidebar:
     for tk in st.session_state.watchlist:
         c1, c2 = st.columns([4, 1])
         if c1.button(
-            f"{'▶ ' if tk == st.session_state.selected_ticker else '  '}{tk}",
+            f"{'▶ ' if tk == st.session_state.selected_ticker else ''}{tk}",
             key=f"sel_{tk}", use_container_width=True
         ):
             st.session_state.selected_ticker = tk
@@ -197,7 +202,7 @@ chg_sign  = "+" if info["change_pct"] >= 0 else ""
 col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
 with col_h1:
     st.markdown(
-        f"## {info['name']} &nbsp; "
+        f"## {TICKER} &nbsp; "
         f"<span style='color:#1A2333;font-size:1.6rem'>${info['price']}</span> &nbsp;"
         f"<span style='color:{chg_color};font-size:1.2rem'>{chg_sign}{info['change_pct']}%</span>",
         unsafe_allow_html=True,
