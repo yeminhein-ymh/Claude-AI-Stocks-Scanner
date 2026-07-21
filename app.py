@@ -56,6 +56,38 @@ def _save_watchlist_state():
             json.dump({"tickers": tickers, "selected": selected}, f)
     except OSError:
         pass
+
+
+def _on_ticker_pick(widget_key: str):
+    st.session_state.selected_ticker = st.session_state[widget_key]
+    _save_watchlist_state()
+
+
+def _ticker_selector(tab_key: str) -> str:
+    """Per-tab ticker dropdown, shares the same underlying selection as the
+    sidebar and every other tab's selector — picking a ticker anywhere updates
+    it everywhere.
+
+    An on_change callback (rather than comparing the widget's return value
+    after the fact) is what makes this safe: the callback updates the shared
+    selected_ticker *before* the rest of the script reruns, so by the time
+    later tabs' selectors render this same run, they already see the new
+    value and sync their own widget state to it correctly. Comparing after
+    the fact can't tell "this widget just changed" apart from "this widget
+    is stale relative to a change made elsewhere," and ends up clobbering
+    the user's own click back to the old value."""
+    watchlist = st.session_state.watchlist
+    current = st.session_state.selected_ticker
+    if current not in watchlist:
+        current = watchlist[0]
+    widget_key = f"ticker_select_{tab_key}"
+    if st.session_state.get(widget_key) != current:
+        st.session_state[widget_key] = current
+    st.selectbox("Ticker", options=watchlist, key=widget_key,
+                 on_change=_on_ticker_pick, args=(widget_key,))
+    return st.session_state[widget_key]
+
+
 from modules.data_fetcher import (
     get_stock_info, get_ohlcv, get_options_chain, get_macro_data,
     get_sector_data, get_current_price,
@@ -456,6 +488,7 @@ with tabs[1]:
 # TAB 2 — CHARTS
 # ═══════════════════════════════════════════════════════════
 with tabs[2]:
+    TICKER = _ticker_selector("charts")
     st.subheader(f"📈 {TICKER} — {timeframe} Chart")
 
     with st.spinner("Loading chart data..."):
@@ -602,6 +635,8 @@ with tabs[2]:
 # TAB 3 — OPTIONS CHAIN
 # ═══════════════════════════════════════════════════════════
 with tabs[3]:
+    TICKER = _ticker_selector("options")
+    info = get_stock_info(TICKER)
     st.subheader(f"🔗 {TICKER} Options Chain")
 
     spot = info["price"]
@@ -707,6 +742,8 @@ with tabs[3]:
 # TAB 4 — SMART MONEY FLOW
 # ═══════════════════════════════════════════════════════════
 with tabs[4]:
+    TICKER = _ticker_selector("smartmoney")
+    spot = get_stock_info(TICKER)["price"]
     st.subheader(f"💥 Smart Money / Unusual Options Activity — {TICKER}")
     st.caption("Flags options with abnormally high volume-to-OI ratio and large premium.")
 
@@ -794,6 +831,7 @@ with tabs[4]:
 # TAB 5 — AI SIGNALS
 # ═══════════════════════════════════════════════════════════
 with tabs[5]:
+    TICKER = _ticker_selector("aisignals")
     st.subheader(f"🤖 AI Prediction Engine — {TICKER}")
 
     with st.spinner("Training XGBoost model on historical data..."):
@@ -902,6 +940,7 @@ with tabs[5]:
 # TAB 6 — SCALPING DASHBOARD
 # ═══════════════════════════════════════════════════════════
 with tabs[6]:
+    TICKER = _ticker_selector("scalping")
     st.subheader(f"⚡ Scalping Dashboard — {TICKER}")
 
     scal_tf = st.selectbox("Scalp Timeframe", ["1 Min", "5 Min", "15 Min"], index=1,
