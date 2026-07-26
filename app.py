@@ -7,16 +7,82 @@ import plotly.express as px
 import time
 import json
 import os
+import requests
 
 import config
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.json")
 MAX_WATCHLIST_SIZE = 30
+GIST_FILENAME = "watchlist.json"
+GIST_API_BASE = "https://api.github.com/gists"
+
+
+def _gist_headers():
+    """None if GITHUB_TOKEN isn't configured in Streamlit secrets — every Gist
+    call is skipped gracefully in that case, falling back to URL/file storage."""
+    try:
+        token = st.secrets.get("GITHUB_TOKEN")
+    except Exception:
+        token = None
+    if not token:
+        return None
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+
+def _gist_id():
+    try:
+        return st.secrets.get("GIST_ID")
+    except Exception:
+        return None
+
+
+def _gist_load():
+    """Cross-browser/cross-device source of truth, when configured. Returns
+    None (not a fallback tuple) if Gist storage isn't set up or fails, so the
+    caller can fall through to the next storage layer."""
+    gist_id, headers = _gist_id(), _gist_headers()
+    if not gist_id or not headers:
+        return None
+    try:
+        resp = requests.get(f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=5)
+        resp.raise_for_status()
+        content = resp.json().get("files", {}).get(GIST_FILENAME, {}).get("content")
+        if not content:
+            return None
+        data = json.loads(content)
+        tickers = [t for t in data.get("tickers", []) if t][:MAX_WATCHLIST_SIZE]
+        if not tickers:
+            return None
+        selected = data.get("selected")
+        return tickers, (selected if selected in tickers else tickers[0])
+    except Exception:
+        return None
+
+
+def _gist_save(tickers, selected):
+    gist_id, headers = _gist_id(), _gist_headers()
+    if not gist_id or not headers:
+        return
+    try:
+        content = json.dumps({"tickers": tickers, "selected": selected})
+        requests.patch(
+            f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=5,
+            json={"files": {GIST_FILENAME: {"content": content}}},
+        )
+    except Exception:
+        pass
 
 
 def _load_watchlist_state():
-    # URL query params first — survives redeploys/restarts since it lives in the
-    # browser's address bar, not server-side storage that gets wiped on redeploy.
+    # GitHub Gist first — the durable, cross-browser/cross-device source of
+    # truth, when GITHUB_TOKEN + GIST_ID are configured in Streamlit secrets.
+    gist_result = _gist_load()
+    if gist_result:
+        return gist_result
+
+    # URL query params next — survives redeploys/restarts since it lives in
+    # the browser's address bar, not server-side storage that gets wiped on
+    # redeploy. Useful on its own if Gist secrets aren't set up.
     try:
         qp_tickers = st.query_params.get("tickers", "")
     except Exception:
@@ -44,7 +110,9 @@ def _load_watchlist_state():
 def _save_watchlist_state():
     tickers = st.session_state.watchlist
     selected = st.session_state.selected_ticker
-    # URL query params — the durable copy, immune to redeploys
+    # GitHub Gist — the durable, cross-browser/cross-device copy
+    _gist_save(tickers, selected)
+    # URL query params — durable within the same browser/URL, immune to redeploys
     try:
         st.query_params["tickers"] = ",".join(tickers)
         st.query_params["selected"] = selected
