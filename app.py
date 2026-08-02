@@ -270,37 +270,38 @@ with st.sidebar:
             st.rerun()
         st.caption(f"Next refresh in {max(0, 60 - int(elapsed))}s")
 
-    st.markdown(f"### 📋 Watchlist ({len(st.session_state.watchlist)}/{MAX_WATCHLIST_SIZE})")
-    new_ticker = st.text_input("Add Ticker", placeholder="e.g. AAPL").upper().strip()
-    if st.button("➕ Add", use_container_width=True) and new_ticker:
-        if new_ticker not in st.session_state.watchlist:
-            if len(st.session_state.watchlist) >= MAX_WATCHLIST_SIZE:
-                st.warning(f"Watchlist is full (max {MAX_WATCHLIST_SIZE}). Remove a ticker first.")
-            else:
-                st.session_state.watchlist.append(new_ticker)
-                _save_watchlist_state()
-                st.rerun()
-        else:
-            st.warning(f"{new_ticker} already in watchlist")
+    st.markdown("### 📋 Watchlist")
+    universe_text = st.text_area(
+        "Universe (comma-separated)",
+        value=", ".join(st.session_state.watchlist),
+        height=100,
+        key="universe_input",
+    )
+    seen = set()
+    parsed = []
+    for t in universe_text.split(","):
+        t = t.strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            parsed.append(t)
+    overflow = len(parsed) - MAX_WATCHLIST_SIZE
+    parsed = parsed[:MAX_WATCHLIST_SIZE]
 
-    st.caption("Click ticker to select it as active:")
-    to_remove = None
-    for tk in st.session_state.watchlist:
-        c1, c2 = st.columns([4, 1])
-        if c1.button(
-            f"{'▶ ' if tk == st.session_state.selected_ticker else ''}{tk}",
-            key=f"sel_{tk}", use_container_width=True
-        ):
-            st.session_state.selected_ticker = tk
-            _save_watchlist_state()
-        if c2.button("✕", key=f"del_{tk}"):
-            to_remove = tk
-    if to_remove and len(st.session_state.watchlist) > 1:
-        st.session_state.watchlist.remove(to_remove)
-        if st.session_state.selected_ticker == to_remove:
-            st.session_state.selected_ticker = st.session_state.watchlist[0]
+    if parsed and parsed != st.session_state.watchlist:
+        st.session_state.watchlist = parsed
+        if st.session_state.selected_ticker not in parsed:
+            st.session_state.selected_ticker = parsed[0]
         _save_watchlist_state()
+        if overflow > 0:
+            st.warning(f"Limit is {MAX_WATCHLIST_SIZE} tickers — dropped the last {overflow}.")
         st.rerun()
+    elif not parsed:
+        st.warning("Universe can't be empty — keeping your last saved list.")
+
+    st.caption(
+        f"{len(st.session_state.watchlist)} saved tickers · limit {MAX_WATCHLIST_SIZE} · "
+        "additions and deletions save automatically"
+    )
 
     st.markdown("---")
     st.markdown("### ⚙️ Chart Settings")
