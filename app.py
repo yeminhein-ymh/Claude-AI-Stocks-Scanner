@@ -44,7 +44,7 @@ def _gist_load():
     if not gist_id or not headers:
         return None
     try:
-        resp = requests.get(f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=5)
+        resp = requests.get(f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=10)
         resp.raise_for_status()
         content = resp.json().get("files", {}).get(GIST_FILENAME, {}).get("content")
         if not content:
@@ -107,17 +107,27 @@ def _load_watchlist_state():
     return config.DEFAULT_TICKERS.copy(), config.DEFAULT_TICKERS[0]
 
 
+def _sync_url_params():
+    """URL-only, no Gist/file writes — safe to call on every page load without
+    risking a transient Gist read failure turning into a permanent bad write."""
+    try:
+        st.query_params["tickers"] = ",".join(st.session_state.watchlist)
+        st.query_params["selected"] = st.session_state.selected_ticker
+    except Exception:
+        pass
+
+
 def _save_watchlist_state():
+    """Full write-through save. Only call this from an actual user action
+    (add/remove/select a ticker) - never from the initial page-load path,
+    or a transient Gist read failure on load would get silently persisted
+    as a permanent overwrite of the real saved list."""
     tickers = st.session_state.watchlist
     selected = st.session_state.selected_ticker
     # GitHub Gist — the durable, cross-browser/cross-device copy
     _gist_save(tickers, selected)
     # URL query params — durable within the same browser/URL, immune to redeploys
-    try:
-        st.query_params["tickers"] = ",".join(tickers)
-        st.query_params["selected"] = selected
-    except Exception:
-        pass
+    _sync_url_params()
     # Local file — convenience fallback within the same running instance
     try:
         with open(WATCHLIST_FILE, "w") as f:
@@ -242,7 +252,7 @@ st.markdown("""
 # ─── Session State Init ──────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
     st.session_state.watchlist, st.session_state.selected_ticker = _load_watchlist_state()
-    _save_watchlist_state()  # stamp the URL immediately so a fresh visit is bookmarkable right away
+    _sync_url_params()  # URL-only stamp; does NOT write to Gist (see _sync_url_params docstring)
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
