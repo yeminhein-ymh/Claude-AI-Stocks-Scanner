@@ -721,7 +721,9 @@ with tabs[3]:
     spot = info["price"]
     chains, expirations = get_options_chain(TICKER)
 
-    if not chains or not expirations:
+    if not spot:
+        st.error(f"No current price available for {TICKER} — can't compute options analytics.")
+    elif not chains or not expirations:
         st.error("Options data not available for this ticker.")
     else:
         expiry_sel = st.selectbox("Expiration Date", expirations)
