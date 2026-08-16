@@ -7,6 +7,7 @@ import plotly.express as px
 import time
 import json
 import os
+import datetime
 import requests
 
 import config
@@ -15,6 +16,14 @@ WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch
 MAX_WATCHLIST_SIZE = 30
 GIST_FILENAME = "watchlist.json"
 GIST_API_BASE = "https://api.github.com/gists"
+
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_history.json")
+HISTORY_GIST_FILENAME = "scan_history.json"
+HISTORY_COLUMNS = [
+    "Ticker", "AI Score", "Class", "Bull %", "Bear %", "Sideways %",
+    "Confidence", "Risk", "Trend", "Momentum", "Volume", "RS",
+    "Fund", "Flow", "ML", "Exp Return %", "R:R", "Trend Stage",
+]
 
 
 def _gist_headers():
@@ -70,6 +79,56 @@ def _gist_save(tickers, selected):
             json={"files": {GIST_FILENAME: {"content": content}}},
         )
     except Exception:
+        pass
+
+
+def _load_scan_history() -> dict:
+    """{date_str: [[row values in HISTORY_COLUMNS order], ...]}. Gist first
+    (cross-device, durable), falling back to the local file (same-deploy only).
+    Stored as compact row-arrays rather than dicts-per-row to keep a year of
+    daily scans comfortably under the Gist API's ~1MB per-file read limit."""
+    gist_id, headers = _gist_id(), _gist_headers()
+    if gist_id and headers:
+        try:
+            resp = requests.get(f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=10)
+            resp.raise_for_status()
+            content = resp.json().get("files", {}).get(HISTORY_GIST_FILENAME, {}).get("content")
+            if content:
+                data = json.loads(content)
+                if isinstance(data, dict) and isinstance(data.get("days"), dict):
+                    return data["days"]
+        except Exception:
+            pass
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        return data.get("days", {}) if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_scan_day(date_str: str, df: pd.DataFrame):
+    """Record/overwrite one day's scan results. Only ever call this from an
+    explicit 'Run AI Scan' click, never from a page-load path (same reasoning
+    as watchlist persistence: a transient read failure must not turn into a
+    permanent bad write)."""
+    history = _load_scan_history()
+    history[date_str] = df[HISTORY_COLUMNS].values.tolist()
+    payload = json.dumps({"columns": HISTORY_COLUMNS, "days": history})
+
+    gist_id, headers = _gist_id(), _gist_headers()
+    if gist_id and headers:
+        try:
+            requests.patch(
+                f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=10,
+                json={"files": {HISTORY_GIST_FILENAME: {"content": payload}}},
+            )
+        except Exception:
+            pass
+    try:
+        with open(HISTORY_FILE, "w") as f:
+            f.write(payload)
+    except OSError:
         pass
 
 
@@ -326,7 +385,7 @@ info = get_stock_info(TICKER)
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
-    "🧠 AI Scanner", "📊 Watchlist", "📈 Charts", "🔗 Options Chain",
+    "🧠 AI Scanner", "📜 History", "📊 Watchlist", "📈 Charts", "🔗 Options Chain",
     "💥 Smart Money", "🤖 AI Signals", "⚡ Scalping",
     "🏦 Heatmap", "📉 Risk Mgmt",
 ])
@@ -386,6 +445,9 @@ with tabs[0]:
                 })
             df_scan = pd.DataFrame(table_rows).sort_values("AI Score", ascending=False).reset_index(drop=True)
             df_scan.index += 1
+
+            if run_clicked:
+                _save_scan_day(datetime.date.today().isoformat(), df_scan)
 
             def _color_class(val):
                 colors = {
@@ -498,9 +560,45 @@ with tabs[0]:
             )
 
 # ═══════════════════════════════════════════════════════════
-# TAB 1 — WATCHLIST OVERVIEW
+# TAB 1 — SCAN HISTORY
 # ═══════════════════════════════════════════════════════════
 with tabs[1]:
+    st.subheader("📜 Scan History")
+    st.caption(
+        "Every time you click 'Run AI Scan', that day's results are recorded here automatically — "
+        "pick a date below to see what the scanner said on that day."
+    )
+
+    history = _load_scan_history()
+
+    if not history:
+        st.info("No scan history yet. Run the AI Scanner and today's results will show up here.")
+    else:
+        dates_sorted = sorted(history.keys(), reverse=True)
+        picked_date = st.selectbox("Select date", dates_sorted)
+        rows = history.get(picked_date, [])
+        if not rows:
+            st.warning(f"No rows recorded for {picked_date}.")
+        else:
+            df_hist = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+            df_hist.index += 1
+            hist_fmt = {
+                "AI Score": "{:.1f}", "Bull %": "{:.1f}%", "Bear %": "{:.1f}%",
+                "Sideways %": "{:.1f}%", "Confidence": "{:.1f}", "Risk": "{:.1f}",
+                "Trend": "{:.1f}", "Momentum": "{:.1f}", "Volume": "{:.1f}", "RS": "{:.1f}",
+                "Fund": "{:.1f}", "Flow": "{:.1f}", "ML": "{:.1f}",
+                "Exp Return %": "{:+.2f}%", "R:R": "{:.2f}",
+            }
+            st.dataframe(
+                df_hist.style.format(hist_fmt),
+                use_container_width=True, height=min(80 + 35 * len(df_hist), 600),
+            )
+            st.caption(f"{len(df_hist)} tickers recorded on {picked_date} · {len(dates_sorted)} days saved total")
+
+# ═══════════════════════════════════════════════════════════
+# TAB 2 — WATCHLIST OVERVIEW
+# ═══════════════════════════════════════════════════════════
+with tabs[2]:
     st.subheader("Watchlist Overview")
 
     rows = []
@@ -564,9 +662,9 @@ with tabs[1]:
         """)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 2 — CHARTS
+# TAB 3 — CHARTS
 # ═══════════════════════════════════════════════════════════
-with tabs[2]:
+with tabs[3]:
     TICKER = _ticker_selector("charts")
     st.subheader(f"📈 {TICKER} — {timeframe} Chart")
 
@@ -711,9 +809,9 @@ with tabs[2]:
             m5.metric("RSI",    rsi_str)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 3 — OPTIONS CHAIN
+# TAB 4 — OPTIONS CHAIN
 # ═══════════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     TICKER = _ticker_selector("options")
     info = get_stock_info(TICKER)
     st.subheader(f"🔗 {TICKER} Options Chain")
@@ -820,9 +918,9 @@ with tabs[3]:
             pass
 
 # ═══════════════════════════════════════════════════════════
-# TAB 4 — SMART MONEY FLOW
+# TAB 5 — SMART MONEY FLOW
 # ═══════════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     TICKER = _ticker_selector("smartmoney")
     spot = get_stock_info(TICKER)["price"]
     st.subheader(f"💥 Smart Money / Unusual Options Activity — {TICKER}")
@@ -909,9 +1007,9 @@ with tabs[4]:
         )
 
 # ═══════════════════════════════════════════════════════════
-# TAB 5 — AI SIGNALS
+# TAB 6 — AI SIGNALS
 # ═══════════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     TICKER = _ticker_selector("aisignals")
     st.subheader(f"🤖 AI Prediction Engine — {TICKER}")
 
@@ -1018,9 +1116,9 @@ with tabs[5]:
         st.plotly_chart(fig_hist, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 6 — SCALPING DASHBOARD
+# TAB 7 — SCALPING DASHBOARD
 # ═══════════════════════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     TICKER = _ticker_selector("scalping")
     st.subheader(f"⚡ Scalping Dashboard — {TICKER}")
 
@@ -1108,9 +1206,9 @@ with tabs[6]:
         st.plotly_chart(fig_scal, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 7 — HEATMAP
+# TAB 8 — HEATMAP
 # ═══════════════════════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     st.subheader("🏦 Institutional Heatmap — Sector Rotation")
 
     with st.spinner("Loading sector data..."):
@@ -1170,9 +1268,9 @@ with tabs[7]:
     st.plotly_chart(fig_rs, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 8 — RISK MANAGEMENT
+# TAB 9 — RISK MANAGEMENT
 # ═══════════════════════════════════════════════════════════
-with tabs[8]:
+with tabs[9]:
     render_risk_panel()
 
 # ─── Footer ─────────────────────────────────────────────────────────────────
