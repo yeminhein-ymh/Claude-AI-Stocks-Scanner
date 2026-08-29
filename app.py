@@ -214,6 +214,122 @@ def _save_scan_day(date_str: str, df: pd.DataFrame):
         pass
 
 
+def _supabase_load_all_history():
+    """Every recorded row across every date, paginated (PostgREST default page
+    size is 1000 rows - a few dozen tickers/day will exceed that within a
+    couple of months)."""
+    url, key = _supabase_config()
+    if not url:
+        return None
+    records = []
+    offset = 0
+    page_size = 1000
+    try:
+        while True:
+            resp = requests.get(
+                f"{url}/rest/v1/{SUPABASE_TABLE}?select=*&order=scan_date.asc"
+                f"&limit={page_size}&offset={offset}",
+                headers=_supabase_headers(key), timeout=15,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            records.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+    except Exception:
+        return None
+
+    if not records:
+        return pd.DataFrame()
+    rows = []
+    for rec in records:
+        row = {disp: rec.get(db) for disp, db in SUPABASE_COLUMN_MAP.items()}
+        row["Date"] = rec.get("scan_date")
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    return df
+
+
+def _load_all_history():
+    """Supabase first (the real store); falls back to the local file (flattened
+    across all recorded days) when Supabase isn't configured."""
+    df = _supabase_load_all_history()
+    if df is not None:
+        return df
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        days = data.get("days", {}) if isinstance(data, dict) else {}
+        frames = []
+        for date_str, rows in days.items():
+            d = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+            d["Date"] = date_str
+            frames.append(d)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    except (OSError, ValueError):
+        return pd.DataFrame()
+
+
+def _predicted_direction(bull, bear, side) -> str:
+    """Same >5pp-margin methodology used in the manual accuracy analysis
+    earlier: only call Bullish/Bearish when one probability clearly leads."""
+    m = max(bull, bear, side)
+    if m == bull and bull - max(bear, side) > 5:
+        return "Bullish"
+    if m == bear and bear - max(bull, side) > 5:
+        return "Bearish"
+    return "Sideways"
+
+
+def _compute_accuracy(df_history: pd.DataFrame, horizon_days: int) -> pd.DataFrame:
+    """For every recorded (Date, Ticker) row with at least `horizon_days` of
+    real trading days elapsed since, fetch actual prices and compare the
+    scanner's Bull/Bear/Sideways call against what actually happened."""
+    rows_out = []
+    for ticker in df_history["Ticker"].dropna().unique():
+        price_df = get_ohlcv(ticker, "2y", "1d")
+        if price_df.empty:
+            continue
+        closes = price_df["Close"]
+        idx = pd.to_datetime(closes.index).tz_localize(None).normalize()
+        closes = pd.Series(closes.values, index=idx).sort_index()
+        trading_days = list(closes.index)
+
+        sub = df_history[df_history["Ticker"] == ticker]
+        for _, row in sub.iterrows():
+            try:
+                scan_date = pd.to_datetime(row["Date"]).normalize()
+            except Exception:
+                continue
+            entry_days = [d for d in trading_days if d <= scan_date]
+            if not entry_days:
+                continue
+            entry_idx = trading_days.index(entry_days[-1])
+            exit_idx = entry_idx + horizon_days
+            if exit_idx >= len(trading_days):
+                continue  # not enough real trading days have elapsed yet - skip, don't guess
+
+            entry_price = closes.iloc[entry_idx]
+            exit_price = closes.iloc[exit_idx]
+            if not entry_price or pd.isna(entry_price) or pd.isna(exit_price):
+                continue
+            actual_return = (exit_price - entry_price) / entry_price * 100
+            pred_dir = _predicted_direction(row["Bull %"], row["Bear %"], row["Sideways %"])
+            actual_dir = "Bullish" if actual_return > 1 else ("Bearish" if actual_return < -1 else "Sideways")
+
+            rows_out.append({
+                "Date": row["Date"], "Ticker": ticker, "Class": row["Class"],
+                "AI Score": row["AI Score"], "Predicted": pred_dir, "Actual": actual_dir,
+                "Actual Return %": round(float(actual_return), 2),
+                "Exp Return %": row["Exp Return %"],
+                "Correct": pred_dir == actual_dir,
+            })
+    return pd.DataFrame(rows_out)
+
+
 def _load_watchlist_state():
     # GitHub Gist first — the durable, cross-browser/cross-device source of
     # truth, when GITHUB_TOKEN + GIST_ID are configured in Streamlit secrets.
@@ -467,7 +583,7 @@ info = get_stock_info(TICKER)
 
 # ─── Tabs ────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
-    "🧠 AI Scanner", "📜 History", "📊 Watchlist", "📈 Charts", "🔗 Options Chain",
+    "🧠 AI Scanner", "📜 History", "🎯 Accuracy", "📊 Watchlist", "📈 Charts", "🔗 Options Chain",
     "💥 Smart Money", "🤖 AI Signals", "⚡ Scalping",
     "🏦 Heatmap", "📉 Risk Mgmt",
 ])
@@ -677,9 +793,86 @@ with tabs[1]:
             st.caption(f"{len(df_hist)} tickers recorded on {picked_date} · {len(dates_sorted)} days saved total")
 
 # ═══════════════════════════════════════════════════════════
-# TAB 2 — WATCHLIST OVERVIEW
+# TAB 2 — SIGNAL ACCURACY
 # ═══════════════════════════════════════════════════════════
 with tabs[2]:
+    st.subheader("🎯 Signal Accuracy")
+    st.caption(
+        "Compares every recorded scan's Bull/Bear/Sideways call against what the ticker's price "
+        "actually did afterward. Only predictions with enough real trading days elapsed since the "
+        "scan are counted — nothing here is guessed or backfilled."
+    )
+
+    horizon = st.selectbox("Evaluation horizon (trading days after the scan)", [5, 10, 20], index=0)
+
+    if st.button("🔍 Run Accuracy Analysis", use_container_width=False):
+        with st.spinner("Fetching historical prices and scoring past predictions — this can take a moment..."):
+            df_all_hist = _load_all_history()
+            st.session_state.accuracy_df = (
+                _compute_accuracy(df_all_hist, horizon) if df_all_hist is not None and not df_all_hist.empty
+                else pd.DataFrame()
+            )
+            st.session_state.accuracy_horizon = horizon
+
+    acc_df = st.session_state.get("accuracy_df")
+
+    if acc_df is None:
+        st.info("Click 'Run Accuracy Analysis' to score your recorded scans against actual price action.")
+    elif acc_df.empty:
+        st.info(
+            "Nothing evaluable yet — either there's no scan history, or not enough real trading days "
+            f"({st.session_state.get('accuracy_horizon', horizon)}) have passed since your earliest scans. "
+            "Check back after the AI Scanner has run for a while."
+        )
+    else:
+        directional = acc_df[acc_df["Predicted"] != "Sideways"]
+        overall_acc = directional["Correct"].mean() * 100 if len(directional) else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Directional Accuracy", f"{overall_acc:.1f}%")
+        c2.metric("Predictions Scored", len(acc_df))
+        c3.metric("Directional Calls", len(directional))
+
+        buy_rows = acc_df[acc_df["Class"].isin(["Buy", "Strong Buy"])]
+        if len(buy_rows):
+            buy_win_rate = (buy_rows["Actual Return %"] > 0).mean() * 100
+            c4.metric("Buy/Strong Buy Win Rate", f"{buy_win_rate:.1f}%")
+        else:
+            c4.metric("Buy/Strong Buy Win Rate", "N/A")
+
+        if len(acc_df) > 1:
+            corr = acc_df["AI Score"].corr(acc_df["Actual Return %"])
+            mae = (acc_df["Exp Return %"] - acc_df["Actual Return %"]).abs().mean()
+            c5, c6 = st.columns(2)
+            c5.metric("AI Score ↔ Actual Return correlation", f"{corr:+.2f}" if pd.notna(corr) else "N/A")
+            c6.metric("Exp Return % MAE", f"{mae:.2f} pp")
+
+        st.divider()
+        st.markdown("#### Accuracy by Classification")
+        by_class_rows = []
+        for cls, grp in acc_df.groupby("Class"):
+            grp_dir = grp[grp["Predicted"] != "Sideways"]
+            by_class_rows.append({
+                "Class": cls, "n": len(grp),
+                "Directional Accuracy": round(grp_dir["Correct"].mean() * 100, 1) if len(grp_dir) else None,
+                "Win Rate (actual > 0)": round((grp["Actual Return %"] > 0).mean() * 100, 1),
+            })
+        st.dataframe(
+            pd.DataFrame(by_class_rows).sort_values("n", ascending=False).reset_index(drop=True),
+            use_container_width=True,
+        )
+
+        st.divider()
+        st.markdown("#### All Scored Predictions")
+        st.dataframe(
+            acc_df.sort_values("Date", ascending=False).reset_index(drop=True),
+            use_container_width=True, height=min(80 + 35 * len(acc_df), 500),
+        )
+
+# ═══════════════════════════════════════════════════════════
+# TAB 3 — WATCHLIST OVERVIEW
+# ═══════════════════════════════════════════════════════════
+with tabs[3]:
     st.subheader("Watchlist Overview")
 
     rows = []
@@ -743,9 +936,9 @@ with tabs[2]:
         """)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 3 — CHARTS
+# TAB 4 — CHARTS
 # ═══════════════════════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     TICKER = _ticker_selector("charts")
     st.subheader(f"📈 {TICKER} — {timeframe} Chart")
 
@@ -890,9 +1083,9 @@ with tabs[3]:
             m5.metric("RSI",    rsi_str)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 4 — OPTIONS CHAIN
+# TAB 5 — OPTIONS CHAIN
 # ═══════════════════════════════════════════════════════════
-with tabs[4]:
+with tabs[5]:
     TICKER = _ticker_selector("options")
     info = get_stock_info(TICKER)
     st.subheader(f"🔗 {TICKER} Options Chain")
@@ -999,9 +1192,9 @@ with tabs[4]:
             pass
 
 # ═══════════════════════════════════════════════════════════
-# TAB 5 — SMART MONEY FLOW
+# TAB 6 — SMART MONEY FLOW
 # ═══════════════════════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     TICKER = _ticker_selector("smartmoney")
     spot = get_stock_info(TICKER)["price"]
     st.subheader(f"💥 Smart Money / Unusual Options Activity — {TICKER}")
@@ -1088,9 +1281,9 @@ with tabs[5]:
         )
 
 # ═══════════════════════════════════════════════════════════
-# TAB 6 — AI SIGNALS
+# TAB 7 — AI SIGNALS
 # ═══════════════════════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     TICKER = _ticker_selector("aisignals")
     st.subheader(f"🤖 AI Prediction Engine — {TICKER}")
 
@@ -1197,9 +1390,9 @@ with tabs[6]:
         st.plotly_chart(fig_hist, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 7 — SCALPING DASHBOARD
+# TAB 8 — SCALPING DASHBOARD
 # ═══════════════════════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     TICKER = _ticker_selector("scalping")
     st.subheader(f"⚡ Scalping Dashboard — {TICKER}")
 
@@ -1287,9 +1480,9 @@ with tabs[7]:
         st.plotly_chart(fig_scal, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 8 — HEATMAP
+# TAB 9 — HEATMAP
 # ═══════════════════════════════════════════════════════════
-with tabs[8]:
+with tabs[9]:
     st.subheader("🏦 Institutional Heatmap — Sector Rotation")
 
     with st.spinner("Loading sector data..."):
@@ -1349,9 +1542,9 @@ with tabs[8]:
     st.plotly_chart(fig_rs, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════
-# TAB 9 — RISK MANAGEMENT
+# TAB 10 — RISK MANAGEMENT
 # ═══════════════════════════════════════════════════════════
-with tabs[9]:
+with tabs[10]:
     render_risk_panel()
 
 # ─── Footer ─────────────────────────────────────────────────────────────────
