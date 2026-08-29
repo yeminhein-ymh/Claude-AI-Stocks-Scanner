@@ -803,7 +803,7 @@ with tabs[2]:
         "scan are counted — nothing here is guessed or backfilled."
     )
 
-    horizon = st.selectbox("Evaluation horizon (trading days after the scan)", [5, 10, 20], index=0)
+    horizon = st.selectbox("Evaluation horizon (trading days after the scan)", [1, 3, 5, 10, 20], index=2)
 
     if st.button("🔍 Run Accuracy Analysis", use_container_width=False):
         with st.spinner("Fetching historical prices and scoring past predictions — this can take a moment..."):
