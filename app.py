@@ -18,12 +18,21 @@ GIST_FILENAME = "watchlist.json"
 GIST_API_BASE = "https://api.github.com/gists"
 
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_history.json")
-HISTORY_GIST_FILENAME = "scan_history.json"
 HISTORY_COLUMNS = [
     "Ticker", "AI Score", "Class", "Bull %", "Bear %", "Sideways %",
     "Confidence", "Risk", "Trend", "Momentum", "Volume", "RS",
     "Fund", "Flow", "ML", "Exp Return %", "R:R", "Trend Stage",
 ]
+SUPABASE_TABLE = "scan_history"
+# Display column name -> snake_case DB column name (see supabase_setup.sql)
+SUPABASE_COLUMN_MAP = {
+    "Ticker": "ticker", "AI Score": "ai_score", "Class": "class",
+    "Bull %": "bull_pct", "Bear %": "bear_pct", "Sideways %": "sideways_pct",
+    "Confidence": "confidence", "Risk": "risk", "Trend": "trend",
+    "Momentum": "momentum", "Volume": "volume", "RS": "rs",
+    "Fund": "fund", "Flow": "flow", "ML": "ml",
+    "Exp Return %": "exp_return_pct", "R:R": "rr", "Trend Stage": "trend_stage",
+}
 
 
 def _gist_headers():
@@ -82,29 +91,107 @@ def _gist_save(tickers, selected):
         pass
 
 
-def _load_scan_history() -> dict:
-    """{date_str: [[row values in HISTORY_COLUMNS order], ...]}. Gist first
-    (cross-device, durable), falling back to the local file (same-deploy only).
-    Stored as compact row-arrays rather than dicts-per-row to keep a year of
-    daily scans comfortably under the Gist API's ~1MB per-file read limit."""
-    gist_id, headers = _gist_id(), _gist_headers()
-    if gist_id and headers:
-        try:
-            resp = requests.get(f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=10)
-            resp.raise_for_status()
-            content = resp.json().get("files", {}).get(HISTORY_GIST_FILENAME, {}).get("content")
-            if content:
-                data = json.loads(content)
-                if isinstance(data, dict) and isinstance(data.get("days"), dict):
-                    return data["days"]
-        except Exception:
-            pass
+def _supabase_config():
+    """None, None if SUPABASE_URL/SUPABASE_KEY aren't configured in Streamlit
+    secrets — every Supabase call is skipped gracefully in that case, falling
+    back to the local file."""
+    try:
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
+    except Exception:
+        return None, None
+    if not url or not key:
+        return None, None
+    return url.rstrip("/"), key
+
+
+def _supabase_headers(key: str) -> dict:
+    return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+
+
+def _supabase_save_day(date_str: str, df: pd.DataFrame) -> bool:
+    url, key = _supabase_config()
+    if not url:
+        return False
+    try:
+        rows = []
+        for _, r in df.iterrows():
+            row = {db_col: r[disp_col] for disp_col, db_col in SUPABASE_COLUMN_MAP.items()}
+            row["scan_date"] = date_str
+            rows.append(row)
+        resp = requests.post(
+            f"{url}/rest/v1/{SUPABASE_TABLE}?on_conflict=scan_date,ticker",
+            headers={**_supabase_headers(key), "Prefer": "resolution=merge-duplicates"},
+            json=rows, timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def _supabase_load_dates() -> list:
+    url, key = _supabase_config()
+    if not url:
+        return []
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}?select=scan_date&order=scan_date.desc",
+            headers=_supabase_headers(key), timeout=10,
+        )
+        resp.raise_for_status()
+        return sorted({row["scan_date"] for row in resp.json()}, reverse=True)
+    except Exception:
+        return []
+
+
+def _supabase_load_day(date_str: str):
+    url, key = _supabase_config()
+    if not url:
+        return None
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}?scan_date=eq.{date_str}&order=ai_score.desc",
+            headers=_supabase_headers(key), timeout=10,
+        )
+        resp.raise_for_status()
+        records = resp.json()
+        if not records:
+            return None
+        rows = [{disp: rec.get(db) for disp, db in SUPABASE_COLUMN_MAP.items()} for rec in records]
+        df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+        numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+        return df
+    except Exception:
+        return None
+
+
+def _load_history_dates() -> list:
+    """Supabase first (durable, cross-device); falls back to the local file
+    (same-deploy only, e.g. local dev with no Supabase secrets configured)."""
+    dates = _supabase_load_dates()
+    if dates:
+        return dates
     try:
         with open(HISTORY_FILE, "r") as f:
             data = json.load(f)
-        return data.get("days", {}) if isinstance(data, dict) else {}
+        return sorted(data.get("days", {}).keys(), reverse=True) if isinstance(data, dict) else []
     except (OSError, ValueError):
-        return {}
+        return []
+
+
+def _load_history_day(date_str: str):
+    df = _supabase_load_day(date_str)
+    if df is not None:
+        return df
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        rows = data.get("days", {}).get(date_str) if isinstance(data, dict) else None
+        return pd.DataFrame(rows, columns=HISTORY_COLUMNS) if rows else None
+    except (OSError, ValueError):
+        return None
 
 
 def _save_scan_day(date_str: str, df: pd.DataFrame):
@@ -112,22 +199,17 @@ def _save_scan_day(date_str: str, df: pd.DataFrame):
     explicit 'Run AI Scan' click, never from a page-load path (same reasoning
     as watchlist persistence: a transient read failure must not turn into a
     permanent bad write)."""
-    history = _load_scan_history()
-    history[date_str] = df[HISTORY_COLUMNS].values.tolist()
-    payload = json.dumps({"columns": HISTORY_COLUMNS, "days": history})
-
-    gist_id, headers = _gist_id(), _gist_headers()
-    if gist_id and headers:
-        try:
-            requests.patch(
-                f"{GIST_API_BASE}/{gist_id}", headers=headers, timeout=10,
-                json={"files": {HISTORY_GIST_FILENAME: {"content": payload}}},
-            )
-        except Exception:
-            pass
+    _supabase_save_day(date_str, df)
+    # Local file — convenience mirror for local dev without Supabase secrets
     try:
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                existing = json.load(f)
+        except (OSError, ValueError):
+            existing = {"columns": HISTORY_COLUMNS, "days": {}}
+        existing.setdefault("days", {})[date_str] = df[HISTORY_COLUMNS].values.tolist()
         with open(HISTORY_FILE, "w") as f:
-            f.write(payload)
+            json.dump(existing, f)
     except OSError:
         pass
 
@@ -569,18 +651,17 @@ with tabs[1]:
         "pick a date below to see what the scanner said on that day."
     )
 
-    history = _load_scan_history()
+    dates_sorted = _load_history_dates()
 
-    if not history:
+    if not dates_sorted:
         st.info("No scan history yet. Run the AI Scanner and today's results will show up here.")
     else:
-        dates_sorted = sorted(history.keys(), reverse=True)
         picked_date = st.selectbox("Select date", dates_sorted)
-        rows = history.get(picked_date, [])
-        if not rows:
+        df_hist = _load_history_day(picked_date)
+        if df_hist is None or df_hist.empty:
             st.warning(f"No rows recorded for {picked_date}.")
         else:
-            df_hist = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+            df_hist = df_hist.sort_values("AI Score", ascending=False).reset_index(drop=True)
             df_hist.index += 1
             hist_fmt = {
                 "AI Score": "{:.1f}", "Bull %": "{:.1f}%", "Bear %": "{:.1f}%",
