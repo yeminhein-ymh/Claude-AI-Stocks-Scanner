@@ -214,6 +214,38 @@ def _save_scan_day(date_str: str, df: pd.DataFrame):
         pass
 
 
+def _supabase_status():
+    """Live connectivity/config check, so 'is history actually persisting
+    permanently' is something the app can answer for itself instead of
+    something we have to guess at from symptoms."""
+    url, key = _supabase_config()
+    if not url:
+        return False, (
+            "Supabase isn't configured (SUPABASE_URL / SUPABASE_KEY missing from Streamlit secrets) — "
+            "scan history is only kept in temporary storage that resets whenever the app redeploys."
+        )
+    try:
+        resp = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}?select=id&limit=1",
+            headers=_supabase_headers(key), timeout=8,
+        )
+        if resp.status_code == 200:
+            return True, "Connected to Supabase — scan history is saved permanently."
+        if resp.status_code == 404:
+            return False, (
+                f"Supabase secrets are configured, but the '{SUPABASE_TABLE}' table doesn't exist yet — "
+                "run supabase_setup.sql in the Supabase SQL Editor."
+            )
+        if resp.status_code in (401, 403):
+            return False, (
+                "Supabase rejected the request (unauthorized) — double-check SUPABASE_KEY is the "
+                "service_role key, not the anon key, and that it's pasted correctly into Streamlit secrets."
+            )
+        return False, f"Supabase returned HTTP {resp.status_code} — check SUPABASE_URL and SUPABASE_KEY."
+    except Exception as e:
+        return False, f"Couldn't reach Supabase ({type(e).__name__}) — history is only kept temporarily."
+
+
 def _supabase_load_all_history():
     """Every recorded row across every date, paginated (PostgREST default page
     size is 1000 rows - a few dozen tickers/day will exceed that within a
@@ -766,6 +798,9 @@ with tabs[1]:
         "Every time you click 'Run AI Scan', that day's results are recorded here automatically — "
         "pick a date below to see what the scanner said on that day."
     )
+
+    _supa_ok, _supa_msg = _supabase_status()
+    (st.success if _supa_ok else st.error)(_supa_msg)
 
     dates_sorted = _load_history_dates()
 
