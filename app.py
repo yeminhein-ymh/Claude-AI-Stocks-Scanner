@@ -316,42 +316,60 @@ def _predicted_direction(bull, bear, side) -> str:
     return "Sideways"
 
 
-def _compute_accuracy(df_history: pd.DataFrame, horizon_days: int) -> pd.DataFrame:
+def _compute_accuracy(df_history: pd.DataFrame, horizon_days: int):
     """For every recorded (Date, Ticker) row with at least `horizon_days` of
     real trading days elapsed since, fetch actual prices and compare the
-    scanner's Bull/Bear/Sideways call against what actually happened."""
+    scanner's Bull/Bear/Sideways call against what actually happened.
+
+    Returns (results_df, diagnostics) — diagnostics counts *why* any row was
+    skipped, so an empty result is something you can read the reason for
+    instead of having to guess at."""
     rows_out = []
+    diag = {
+        "total_rows": int(len(df_history)),
+        "skipped_no_price_data": 0,   # ticker's price history couldn't be fetched at all
+        "skipped_no_entry_day": 0,    # no trading day on/before the scan date (too new a listing, bad ticker, etc.)
+        "skipped_insufficient_forward": 0,  # not enough real trading days have elapsed yet since the scan
+        "skipped_missing_price": 0,   # entry/exit price came back NaN
+        "evaluated": 0,
+    }
     for ticker in df_history["Ticker"].dropna().unique():
         price_df = get_ohlcv(ticker, "2y", "1d")
+        sub = df_history[df_history["Ticker"] == ticker]
         if price_df.empty:
+            diag["skipped_no_price_data"] += len(sub)
             continue
         closes = price_df["Close"]
         idx = pd.to_datetime(closes.index).tz_localize(None).normalize()
         closes = pd.Series(closes.values, index=idx).sort_index()
         trading_days = list(closes.index)
 
-        sub = df_history[df_history["Ticker"] == ticker]
         for _, row in sub.iterrows():
             try:
                 scan_date = pd.to_datetime(row["Date"]).normalize()
             except Exception:
+                diag["skipped_no_entry_day"] += 1
                 continue
             entry_days = [d for d in trading_days if d <= scan_date]
             if not entry_days:
+                diag["skipped_no_entry_day"] += 1
                 continue
             entry_idx = trading_days.index(entry_days[-1])
             exit_idx = entry_idx + horizon_days
             if exit_idx >= len(trading_days):
+                diag["skipped_insufficient_forward"] += 1
                 continue  # not enough real trading days have elapsed yet - skip, don't guess
 
             entry_price = closes.iloc[entry_idx]
             exit_price = closes.iloc[exit_idx]
             if not entry_price or pd.isna(entry_price) or pd.isna(exit_price):
+                diag["skipped_missing_price"] += 1
                 continue
             actual_return = (exit_price - entry_price) / entry_price * 100
             pred_dir = _predicted_direction(row["Bull %"], row["Bear %"], row["Sideways %"])
             actual_dir = "Bullish" if actual_return > 1 else ("Bearish" if actual_return < -1 else "Sideways")
 
+            diag["evaluated"] += 1
             rows_out.append({
                 "Date": row["Date"], "Ticker": ticker, "Class": row["Class"],
                 "AI Score": row["AI Score"], "Predicted": pred_dir, "Actual": actual_dir,
@@ -359,7 +377,7 @@ def _compute_accuracy(df_history: pd.DataFrame, horizon_days: int) -> pd.DataFra
                 "Exp Return %": row["Exp Return %"],
                 "Correct": pred_dir == actual_dir,
             })
-    return pd.DataFrame(rows_out)
+    return pd.DataFrame(rows_out), diag
 
 
 def _load_watchlist_state():
@@ -843,13 +861,16 @@ with tabs[2]:
     if st.button("🔍 Run Accuracy Analysis", use_container_width=False):
         with st.spinner("Fetching historical prices and scoring past predictions — this can take a moment..."):
             df_all_hist = _load_all_history()
-            st.session_state.accuracy_df = (
-                _compute_accuracy(df_all_hist, horizon) if df_all_hist is not None and not df_all_hist.empty
-                else pd.DataFrame()
-            )
+            if df_all_hist is not None and not df_all_hist.empty:
+                acc_result, acc_diag = _compute_accuracy(df_all_hist, horizon)
+            else:
+                acc_result, acc_diag = pd.DataFrame(), {"total_rows": 0}
+            st.session_state.accuracy_df = acc_result
+            st.session_state.accuracy_diag = acc_diag
             st.session_state.accuracy_horizon = horizon
 
     acc_df = st.session_state.get("accuracy_df")
+    acc_diag = st.session_state.get("accuracy_diag", {})
 
     if acc_df is None:
         st.info("Click 'Run Accuracy Analysis' to score your recorded scans against actual price action.")
@@ -859,6 +880,15 @@ with tabs[2]:
             f"({st.session_state.get('accuracy_horizon', horizon)}) have passed since your earliest scans. "
             "Check back after the AI Scanner has run for a while."
         )
+        if acc_diag.get("total_rows"):
+            st.caption(
+                f"Diagnostics — {acc_diag['total_rows']} recorded rows: "
+                f"{acc_diag.get('skipped_no_price_data', 0)} had no fetchable price data, "
+                f"{acc_diag.get('skipped_no_entry_day', 0)} had no trading day on/before the scan date, "
+                f"{acc_diag.get('skipped_insufficient_forward', 0)} don't have enough real trading days elapsed yet, "
+                f"{acc_diag.get('skipped_missing_price', 0)} had missing entry/exit prices, "
+                f"{acc_diag.get('evaluated', 0)} evaluated."
+            )
     else:
         directional = acc_df[acc_df["Predicted"] != "Sideways"]
         overall_acc = directional["Correct"].mean() * 100 if len(directional) else 0
