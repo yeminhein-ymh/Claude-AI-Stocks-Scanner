@@ -649,10 +649,17 @@ with tabs[0]:
     )
 
     run_clicked = st.button("🔄 Run AI Scan", use_container_width=False)
-    if run_clicked or "scanner_results" not in st.session_state:
+    is_first_run_this_session = "scanner_results" not in st.session_state
+    if run_clicked or is_first_run_this_session:
         with st.spinner(f"Scanning {len(st.session_state.watchlist)} tickers across 8 factor categories..."):
             st.session_state.scanner_results = run_scan(tuple(st.session_state.watchlist))
             st.session_state.scanner_tickers = tuple(st.session_state.watchlist)
+
+    # Manual "Run AI Scan" clicks always save, any day - that's an explicit action.
+    # The automatic first-scan-of-the-session save skips weekends: markets are
+    # closed, so it would only be re-scoring Friday's stale close under a new
+    # date label, not capturing anything new.
+    should_save_scan = run_clicked or (is_first_run_this_session and datetime.date.today().weekday() < 5)
 
     results = st.session_state.get("scanner_results", [])
     scanned_tickers = st.session_state.get("scanner_tickers", ())
@@ -694,8 +701,14 @@ with tabs[0]:
             df_scan = pd.DataFrame(table_rows).sort_values("AI Score", ascending=False).reset_index(drop=True)
             df_scan.index += 1
 
-            if run_clicked:
+            if should_save_scan:
                 _save_scan_day(datetime.date.today().isoformat(), df_scan)
+                st.caption(f"📌 Recorded to Scan History for {datetime.date.today().isoformat()}.")
+            elif is_first_run_this_session:
+                st.caption(
+                    f"Weekend ({datetime.date.today().strftime('%A')}) — not auto-recorded to Scan History "
+                    "since markets are closed. Click 'Run AI Scan' to save it anyway if you want to."
+                )
 
             def _color_class(val):
                 colors = {
