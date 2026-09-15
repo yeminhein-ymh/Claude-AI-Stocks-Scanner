@@ -249,10 +249,12 @@ def _supabase_status():
 def _supabase_load_all_history():
     """Every recorded row across every date, paginated (PostgREST default page
     size is 1000 rows - a few dozen tickers/day will exceed that within a
-    couple of months)."""
+    couple of months). Returns (df_or_None, error_message_or_None) - None df
+    with a message means the Supabase call itself failed (vs. a legitimately
+    empty table, which returns an empty DataFrame with no error)."""
     url, key = _supabase_config()
     if not url:
-        return None
+        return None, "Supabase not configured"
     records = []
     offset = 0
     page_size = 1000
@@ -263,17 +265,18 @@ def _supabase_load_all_history():
                 f"&limit={page_size}&offset={offset}",
                 headers=_supabase_headers(key), timeout=15,
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
             page = resp.json()
             records.extend(page)
             if len(page) < page_size:
                 break
             offset += page_size
-    except Exception:
-        return None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
     if not records:
-        return pd.DataFrame()
+        return pd.DataFrame(), None
     rows = []
     for rec in records:
         row = {disp: rec.get(db) for disp, db in SUPABASE_COLUMN_MAP.items()}
@@ -282,15 +285,18 @@ def _supabase_load_all_history():
     df = pd.DataFrame(rows)
     numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    return df
+    return df, None
 
 
 def _load_all_history():
     """Supabase first (the real store); falls back to the local file (flattened
-    across all recorded days) when Supabase isn't configured."""
-    df = _supabase_load_all_history()
+    across all recorded days) when Supabase isn't configured or errors out.
+    Returns (df, error_message_or_None) - the message is only set when
+    Supabase was configured but the call itself failed (so the caller can
+    show *why* it fell back, instead of a silent empty result)."""
+    df, err = _supabase_load_all_history()
     if df is not None:
-        return df
+        return df, None
     try:
         with open(HISTORY_FILE, "r") as f:
             data = json.load(f)
@@ -300,9 +306,10 @@ def _load_all_history():
             d = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
             d["Date"] = date_str
             frames.append(d)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        fallback_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     except (OSError, ValueError):
-        return pd.DataFrame()
+        fallback_df = pd.DataFrame()
+    return fallback_df, err
 
 
 def _predicted_direction(bull, bear, side) -> str:
@@ -873,19 +880,21 @@ with tabs[2]:
 
     if st.button("🔍 Run Accuracy Analysis", use_container_width=False):
         with st.spinner("Fetching historical prices and scoring past predictions — this can take a moment..."):
-            df_all_hist = _load_all_history()
+            df_all_hist, load_err = _load_all_history()
             if df_all_hist is not None and not df_all_hist.empty:
                 acc_result, acc_diag = _compute_accuracy(df_all_hist, horizon)
             else:
                 acc_result, acc_diag = pd.DataFrame(), {"total_rows": 0}
             st.session_state.accuracy_df = acc_result
             st.session_state.accuracy_diag = acc_diag
+            st.session_state.accuracy_load_err = load_err
             st.session_state.accuracy_horizon = horizon
             st.session_state.accuracy_computed_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     acc_df = st.session_state.get("accuracy_df")
     acc_diag = st.session_state.get("accuracy_diag", {})
     acc_computed_at = st.session_state.get("accuracy_computed_at")
+    acc_load_err = st.session_state.get("accuracy_load_err")
 
     if acc_computed_at:
         st.caption(
@@ -893,6 +902,8 @@ with tabs[2]:
             "click 'Run Accuracy Analysis' again for a fresh result (new data, or a different horizon, "
             "does not refresh this automatically)."
         )
+    if acc_load_err:
+        st.error(f"Couldn't load scan history from Supabase for this analysis: {acc_load_err}")
 
     if acc_df is None:
         st.info("Click 'Run Accuracy Analysis' to score your recorded scans against actual price action.")
