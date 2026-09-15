@@ -881,9 +881,18 @@ with tabs[2]:
             st.session_state.accuracy_df = acc_result
             st.session_state.accuracy_diag = acc_diag
             st.session_state.accuracy_horizon = horizon
+            st.session_state.accuracy_computed_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     acc_df = st.session_state.get("accuracy_df")
     acc_diag = st.session_state.get("accuracy_diag", {})
+    acc_computed_at = st.session_state.get("accuracy_computed_at")
+
+    if acc_computed_at:
+        st.caption(
+            f"🕒 Last analyzed: {acc_computed_at} at horizon={st.session_state.get('accuracy_horizon')} — "
+            "click 'Run Accuracy Analysis' again for a fresh result (new data, or a different horizon, "
+            "does not refresh this automatically)."
+        )
 
     if acc_df is None:
         st.info("Click 'Run Accuracy Analysis' to score your recorded scans against actual price action.")
