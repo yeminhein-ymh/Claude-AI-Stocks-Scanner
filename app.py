@@ -7,6 +7,8 @@ import plotly.express as px
 import time
 import json
 import os
+import io
+import html
 import datetime
 import requests
 
@@ -212,8 +214,11 @@ def _save_scan_day(date_str: str, df: pd.DataFrame):
             json.dump(existing, f)
     except OSError:
         pass
+    _cached_all_history.clear()
+    _cached_backup_files.clear()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _supabase_status():
     """Live connectivity/config check, so 'is history actually persisting
     permanently' is something the app can answer for itself instead of
@@ -295,8 +300,24 @@ def _load_all_history():
     Supabase was configured but the call itself failed (so the caller can
     show *why* it fell back, instead of a silent empty result)."""
     df, err = _supabase_load_all_history()
+    if df is not None and not df.empty:
+        return df, None
+
+    # The bulk query failed or came back empty. Rebuild from the same per-date
+    # loaders the History tab uses, so the two can never disagree about what's saved.
+    frames = []
+    for date_str in _supabase_load_dates():
+        day = _supabase_load_day(date_str)
+        if day is not None and not day.empty:
+            day = day.copy()
+            day["Date"] = date_str
+            frames.append(day)
+    if frames:
+        note = err or "bulk history query returned no rows; rebuilt from per-date queries"
+        return pd.concat(frames, ignore_index=True), note
     if df is not None:
         return df, None
+
     try:
         with open(HISTORY_FILE, "r") as f:
             data = json.load(f)
@@ -323,68 +344,203 @@ def _predicted_direction(bull, bear, side) -> str:
     return "Sideways"
 
 
-def _compute_accuracy(df_history: pd.DataFrame, horizon_days: int):
-    """For every recorded (Date, Ticker) row with at least `horizon_days` of
-    real trading days elapsed since, fetch actual prices and compare the
-    scanner's Bull/Bear/Sideways call against what actually happened.
+ACCURACY_HORIZONS = [1, 3, 5, 10, 20]
 
-    Returns (results_df, diagnostics) — diagnostics counts *why* any row was
-    skipped, so an empty result is something you can read the reason for
-    instead of having to guess at."""
-    rows_out = []
+
+def _fmt_long_date(date_str) -> str:
+    try:
+        return pd.to_datetime(date_str).strftime("%d %b %Y")
+    except Exception:
+        return str(date_str)
+
+
+def _est_maturity(scan_date, horizon: int) -> str:
+    """Calendar estimate (weekends skipped, exchange holidays ignored) - the
+    real evaluation always uses observed trading days from price history."""
+    return (pd.Timestamp(scan_date) + pd.offsets.BDay(horizon)).strftime("%Y-%m-%d")
+
+
+def _us_market_now():
+    try:
+        return pd.Timestamp.now(tz="America/New_York")
+    except Exception:
+        return pd.Timestamp.utcnow() - pd.Timedelta(hours=4)
+
+
+def _compute_outcomes(df_history: pd.DataFrame, horizons=ACCURACY_HORIZONS):
+    """Score every recorded (Date, Ticker) prediction at every horizon.
+
+    A horizon is 'completed' only when that many *real observed trading days*
+    have closed since the scan's entry day; otherwise it is 'pending' (or
+    'No price data' when the ticker's history can't be fetched). Nothing is
+    guessed or backfilled.
+
+    Returns (completed_df, pending_df, diagnostics)."""
+    completed, pending = [], []
     diag = {
         "total_rows": int(len(df_history)),
-        "skipped_no_price_data": 0,   # ticker's price history couldn't be fetched at all
-        "skipped_no_entry_day": 0,    # no trading day on/before the scan date (too new a listing, bad ticker, etc.)
-        "skipped_insufficient_forward": 0,  # not enough real trading days have elapsed yet since the scan
-        "skipped_missing_price": 0,   # entry/exit price came back NaN
-        "evaluated": 0,
+        "tickers": int(df_history["Ticker"].nunique()),
+        "no_price_data_rows": 0,
+        "no_entry_day_rows": 0,
     }
+    now_et = _us_market_now()
+    today_str = now_et.strftime("%Y-%m-%d")
+    market_still_open_today = now_et.hour < 17
+
+    def _pend(row, ticker, h, status):
+        pending.append({
+            "Prediction Date": str(row["Date"]), "Ticker": ticker, "Horizon": h,
+            "Estimated Maturity": _est_maturity(row["Date"], h), "Maturity Status": status,
+        })
+
     for ticker in df_history["Ticker"].dropna().unique():
-        price_df = get_ohlcv(ticker, "2y", "1d")
         sub = df_history[df_history["Ticker"] == ticker]
-        if price_df.empty:
-            diag["skipped_no_price_data"] += len(sub)
+        price_df = get_ohlcv(ticker, "2y", "1d")
+        if price_df is None or price_df.empty:
+            diag["no_price_data_rows"] += len(sub)
+            for _, row in sub.iterrows():
+                for h in horizons:
+                    _pend(row, ticker, h, "No price data")
             continue
+
         closes = price_df["Close"]
         idx = pd.to_datetime(closes.index).tz_localize(None).normalize()
         closes = pd.Series(closes.values, index=idx).sort_index()
-        trading_days = list(closes.index)
+        closes = closes[~closes.index.duplicated(keep="last")]
+        trading_days = closes.index
 
         for _, row in sub.iterrows():
             try:
                 scan_date = pd.to_datetime(row["Date"]).normalize()
             except Exception:
-                diag["skipped_no_entry_day"] += 1
+                diag["no_entry_day_rows"] += 1
                 continue
-            entry_days = [d for d in trading_days if d <= scan_date]
-            if not entry_days:
-                diag["skipped_no_entry_day"] += 1
+            # Weekend/holiday scans resolve to the most recent PRIOR trading day.
+            entry_idx = int(trading_days.searchsorted(scan_date, side="right")) - 1
+            if entry_idx < 0:
+                diag["no_entry_day_rows"] += 1
+                for h in horizons:
+                    _pend(row, ticker, h, "No trading day on/before scan date")
                 continue
-            entry_idx = trading_days.index(entry_days[-1])
-            exit_idx = entry_idx + horizon_days
-            if exit_idx >= len(trading_days):
-                diag["skipped_insufficient_forward"] += 1
-                continue  # not enough real trading days have elapsed yet - skip, don't guess
 
             entry_price = closes.iloc[entry_idx]
-            exit_price = closes.iloc[exit_idx]
-            if not entry_price or pd.isna(entry_price) or pd.isna(exit_price):
-                diag["skipped_missing_price"] += 1
-                continue
-            actual_return = (exit_price - entry_price) / entry_price * 100
             pred_dir = _predicted_direction(row["Bull %"], row["Bear %"], row["Sideways %"])
-            actual_dir = "Bullish" if actual_return > 1 else ("Bearish" if actual_return < -1 else "Sideways")
+            for h in horizons:
+                exit_idx = entry_idx + h
+                if exit_idx >= len(trading_days):
+                    _pend(row, ticker, h, "Pending")
+                    continue
+                exit_day = trading_days[exit_idx]
+                if exit_day.strftime("%Y-%m-%d") == today_str and market_still_open_today:
+                    _pend(row, ticker, h, "Pending")  # today's bar isn't a final close yet
+                    continue
+                exit_price = closes.iloc[exit_idx]
+                if not entry_price or pd.isna(entry_price) or pd.isna(exit_price):
+                    _pend(row, ticker, h, "Missing price")
+                    continue
+                actual_return = (exit_price - entry_price) / entry_price * 100
+                actual_dir = "Bullish" if actual_return > 1 else ("Bearish" if actual_return < -1 else "Sideways")
+                completed.append({
+                    "Scan Date": str(row["Date"]), "Ticker": ticker, "Horizon": h,
+                    "Class": row["Class"], "AI Score": row["AI Score"],
+                    "Predicted": pred_dir, "Actual": actual_dir,
+                    "Actual Return %": round(float(actual_return), 2),
+                    "Exp Return %": row["Exp Return %"],
+                    "Correct": pred_dir == actual_dir,
+                    "Entry Day": trading_days[entry_idx].strftime("%Y-%m-%d"),
+                    "Exit Day": exit_day.strftime("%Y-%m-%d"),
+                })
+    diag["completed"] = len(completed)
+    diag["pending"] = len(pending)
+    return pd.DataFrame(completed), pd.DataFrame(pending), diag
 
-            diag["evaluated"] += 1
-            rows_out.append({
-                "Date": row["Date"], "Ticker": ticker, "Class": row["Class"],
-                "AI Score": row["AI Score"], "Predicted": pred_dir, "Actual": actual_dir,
-                "Actual Return %": round(float(actual_return), 2),
-                "Exp Return %": row["Exp Return %"],
-                "Correct": pred_dir == actual_dir,
-            })
-    return pd.DataFrame(rows_out), diag
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_all_history():
+    return _load_all_history()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_backup_files():
+    """(csv_bytes, xlsx_bytes_or_None, n_rows, n_dates) for the full archive."""
+    df, _err = _load_all_history()
+    if df is None or df.empty:
+        return None, None, 0, 0
+    cols = ["Date"] + HISTORY_COLUMNS
+    out = df[cols].sort_values(["Date", "AI Score"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        out.to_csv(index=False).encode("utf-8"),
+        _to_xlsx_bytes(out, "Scanner archive"),
+        int(len(out)), int(out["Date"].nunique()),
+    )
+
+
+def _to_xlsx_bytes(df: pd.DataFrame, sheet_name: str):
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+        return buf.getvalue()
+    except Exception:
+        return None  # openpyxl missing - CSV still works, Excel button is just hidden
+
+
+def _stat_card(label: str, value: str) -> str:
+    return (
+        "<div style='background:#FFFFFF;border:1px solid #E3EAF3;border-radius:14px;"
+        "padding:14px 18px;box-shadow:0 1px 4px rgba(26,35,51,0.08);min-height:92px'>"
+        f"<div style='font-size:0.68rem;letter-spacing:0.07em;color:#5B6B82;text-transform:uppercase;"
+        f"font-weight:600'>{html.escape(str(label))}</div>"
+        f"<div style='font-size:1.4rem;color:#1A2333;font-weight:600;line-height:1.25;margin-top:6px'>"
+        f"{html.escape(str(value))}</div></div>"
+    )
+
+
+def _evaluate_matured():
+    """Load the full archive and score it at every horizon. Result lives in
+    session_state so the History and Accuracy tabs share it."""
+    _cached_all_history.clear()
+    _cached_backup_files.clear()
+    hist, load_err = _cached_all_history()
+    if hist is None or hist.empty:
+        completed, pending = pd.DataFrame(), pd.DataFrame()
+        diag = {"total_rows": 0, "tickers": 0, "no_price_data_rows": 0, "no_entry_day_rows": 0,
+                "completed": 0, "pending": 0}
+        n_dates = 0
+    else:
+        completed, pending, diag = _compute_outcomes(hist)
+        n_dates = int(hist["Date"].nunique())
+    st.session_state.acc_outcomes = {
+        "completed": completed, "pending": pending, "diag": diag,
+        "load_err": load_err, "dates": n_dates,
+        "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _archive_header(key_prefix: str, supa_ok: bool):
+    """Shared status cards + 'Evaluate Matured Predictions' button (History and
+    Accuracy tabs both show it, like the reference archive page)."""
+    res = st.session_state.get("acc_outcomes")
+    last_eval = "Not evaluated yet"
+    if res is not None and not res["completed"].empty:
+        last_eval = str(res["completed"]["Exit Day"].max())
+    elif res is not None:
+        last_eval = "Nothing matured yet"
+
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(_stat_card("Storage backend", "Supabase PostgreSQL" if supa_ok else "Temporary local file"),
+                unsafe_allow_html=True)
+    c2.markdown(_stat_card("Retention through", "No automatic expiry" if supa_ok else "Until next redeploy"),
+                unsafe_allow_html=True)
+    c3.markdown(_stat_card("Last evaluated market date", last_eval), unsafe_allow_html=True)
+
+    st.write("")
+    if st.button("Evaluate Matured Predictions", type="primary", key=f"{key_prefix}_eval"):
+        with st.spinner("Fetching real prices and scoring every saved prediction at 1/3/5/10/20 trading days..."):
+            _evaluate_matured()
+        st.rerun()
+    if res is not None:
+        st.caption(f"Last evaluated {res['at']} · {res['dates']} saved date(s) scored.")
 
 
 def _load_watchlist_state():
@@ -828,144 +984,291 @@ with tabs[0]:
             )
 
 # ═══════════════════════════════════════════════════════════
-# TAB 1 — SCAN HISTORY
+# TAB 1 — DAILY AI SCANNER ARCHIVE (HISTORY)
 # ═══════════════════════════════════════════════════════════
 with tabs[1]:
-    st.subheader("📜 Scan History")
+    st.header("Daily AI Scanner Archive")
     st.caption(
-        "Every time you click 'Run AI Scan', that day's results are recorded here automatically — "
-        "pick a date below to see what the scanner said on that day."
+        "The first AI Scanner load on each weekday saves that day's result for every ticker; clicking "
+        "'Run AI Scan' refreshes that day's record. Saved records are never deleted automatically."
     )
 
     _supa_ok, _supa_msg = _supabase_status()
-    (st.success if _supa_ok else st.error)(_supa_msg)
-
     dates_sorted = _load_history_dates()
+    _archive_header("hist", _supa_ok)
+
+    if _supa_ok:
+        st.success(f"Permanent archive connected · {len(dates_sorted)} saved market date(s).")
+    else:
+        st.error(_supa_msg)
 
     if not dates_sorted:
-        st.info("No scan history yet. Run the AI Scanner and today's results will show up here.")
+        st.info("No scan history yet. The AI Scanner saves each weekday's results here automatically.")
     else:
-        picked_date = st.selectbox("Select date", dates_sorted)
-        df_hist = _load_history_day(picked_date)
-        if df_hist is None or df_hist.empty:
+        _csv_all, _xlsx_all, _bk_rows, _bk_dates = _cached_backup_files()
+        bk1, bk2, _bk_sp = st.columns([1, 1, 2])
+        if _csv_all:
+            bk1.download_button("Backup all dates CSV", _csv_all, file_name="scanner_archive_all_dates.csv",
+                                mime="text/csv", key="hist_bk_csv")
+        if _xlsx_all:
+            bk2.download_button(
+                "Backup all dates Excel", _xlsx_all, file_name="scanner_archive_all_dates.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="hist_bk_xlsx",
+            )
+
+        picked_date = st.selectbox("Saved scanner date", dates_sorted, format_func=_fmt_long_date,
+                                   key="hist_picked_date")
+        df_day = _load_history_day(picked_date)
+        if df_day is None or df_day.empty:
             st.warning(f"No rows recorded for {picked_date}.")
         else:
-            df_hist = df_hist.sort_values("AI Score", ascending=False).reset_index(drop=True)
-            df_hist.index += 1
-            hist_fmt = {
-                "AI Score": "{:.1f}", "Bull %": "{:.1f}%", "Bear %": "{:.1f}%",
-                "Sideways %": "{:.1f}%", "Confidence": "{:.1f}", "Risk": "{:.1f}",
-                "Trend": "{:.1f}", "Momentum": "{:.1f}", "Volume": "{:.1f}", "RS": "{:.1f}",
-                "Fund": "{:.1f}", "Flow": "{:.1f}", "ML": "{:.1f}",
-                "Exp Return %": "{:+.2f}%", "R:R": "{:.2f}",
+            df_day = df_day.sort_values("AI Score", ascending=False).reset_index(drop=True)
+            df_day.insert(0, "Rank", df_day.index + 1)
+
+            hf1, hf2, hf3 = st.columns(3)
+            sel_tickers = hf1.multiselect("Ticker", sorted(df_day["Ticker"].dropna().unique()),
+                                          placeholder="Choose options", key=f"hist_f_ticker_{picked_date}")
+            sel_class = hf2.multiselect("Signal", sorted(df_day["Class"].dropna().unique()),
+                                        placeholder="Choose options", key=f"hist_f_class_{picked_date}")
+            sel_stage = hf3.multiselect("Trend stage", sorted(df_day["Trend Stage"].dropna().unique()),
+                                        placeholder="Choose options", key=f"hist_f_stage_{picked_date}")
+            view = df_day
+            if sel_tickers:
+                view = view[view["Ticker"].isin(sel_tickers)]
+            if sel_class:
+                view = view[view["Class"].isin(sel_class)]
+            if sel_stage:
+                view = view[view["Trend Stage"].isin(sel_stage)]
+
+            res_h = st.session_state.get("acc_outcomes")
+            day_done = pd.DataFrame()
+            if res_h is not None and not res_h["completed"].empty:
+                day_done = res_h["completed"]
+                day_done = day_done[(day_done["Scan Date"] == str(picked_date)) & day_done["Ticker"].isin(view["Ticker"])]
+            if res_h is None:
+                done_txt, acc_txt_h = "Not evaluated", "N/A"
+            else:
+                done_txt = str(len(day_done))
+                dir_day = day_done[day_done["Predicted"] != "Sideways"] if not day_done.empty else day_done
+                acc_txt_h = f"{dir_day['Correct'].mean() * 100:.1f}%" if len(dir_day) else "N/A"
+
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.markdown(_stat_card("Saved dates", len(dates_sorted)), unsafe_allow_html=True)
+            mc2.markdown(_stat_card("Records on date", len(view)), unsafe_allow_html=True)
+            mc3.markdown(_stat_card("Completed outcomes", done_txt), unsafe_allow_html=True)
+            mc4.markdown(_stat_card("Accuracy %", acc_txt_h), unsafe_allow_html=True)
+
+            table = view.rename(columns={"Class": "Classification"})
+            if not day_done.empty:
+                ret = day_done.pivot_table(index="Ticker", columns="Horizon", values="Actual Return %", aggfunc="first")
+                ret.columns = [f"{int(h)}D Return %" for h in ret.columns]
+                table = table.merge(ret.reset_index(), on="Ticker", how="left")
+
+            st.write("")
+            st.subheader(f"Saved scanner result · {_fmt_long_date(picked_date)}")
+            num1 = lambda label: st.column_config.NumberColumn(label, format="%.1f")
+            col_cfg = {
+                "Rank": st.column_config.NumberColumn("Rank", format="%d", width="small"),
+                "AI Score": st.column_config.ProgressColumn("AI Score", min_value=0, max_value=100, format="%.1f"),
+                "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f"),
+                "Bear %": st.column_config.ProgressColumn("Bear %", min_value=0, max_value=100, format="%.1f"),
+                "Sideways %": st.column_config.ProgressColumn("Sideways %", min_value=0, max_value=100, format="%.1f"),
+                "Confidence": num1("Confidence"), "Risk": num1("Risk"), "Trend": num1("Trend"),
+                "Momentum": num1("Momentum"), "Volume": num1("Volume"), "RS": num1("RS"),
+                "Fund": num1("Fund"), "Flow": num1("Flow"), "ML": num1("ML"),
+                "Exp Return %": st.column_config.NumberColumn("Exp Return %", format="%+.2f"),
+                "R:R": st.column_config.NumberColumn("R:R", format="%.2f"),
             }
-            st.dataframe(
-                df_hist.style.format(hist_fmt),
-                use_container_width=True, height=min(80 + 35 * len(df_hist), 600),
-            )
-            st.caption(f"{len(df_hist)} tickers recorded on {picked_date} · {len(dates_sorted)} days saved total")
+            for h in ACCURACY_HORIZONS:
+                col_cfg[f"{h}D Return %"] = st.column_config.NumberColumn(f"{h}D Return %", format="%+.2f")
+            st.dataframe(table, column_config=col_cfg, hide_index=True, use_container_width=True,
+                         height=min(60 + 35 * len(table), 640))
+
+            dl1, dl2, _dl_sp = st.columns([1, 1, 2])
+            day_csv = table.to_csv(index=False).encode("utf-8")
+            dl1.download_button("Download selected date CSV", day_csv,
+                                file_name=f"scanner_{picked_date}.csv", mime="text/csv", key="hist_day_csv")
+            day_xlsx = _to_xlsx_bytes(table, f"Scan {picked_date}")
+            if day_xlsx:
+                dl2.download_button(
+                    "Download selected date Excel", day_xlsx, file_name=f"scanner_{picked_date}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="hist_day_xlsx",
+                )
 
 # ═══════════════════════════════════════════════════════════
 # TAB 2 — SIGNAL ACCURACY
 # ═══════════════════════════════════════════════════════════
 with tabs[2]:
-    st.subheader("🎯 Signal Accuracy")
+    st.header("Signal Accuracy")
     st.caption(
-        "Compares every recorded scan's Bull/Bear/Sideways call against what the ticker's price "
-        "actually did afterward. Only predictions with enough real trading days elapsed since the "
-        "scan are counted — nothing here is guessed or backfilled."
+        "Out-of-sample results from the saved scanner archive at 1, 3, 5, 10 and 20 trading days. "
+        "Accuracy is only claimed after each horizon has matured — nothing is guessed or backfilled."
     )
 
-    horizon = st.selectbox("Evaluation horizon (trading days after the scan)", [1, 3, 5, 10, 20], index=2)
+    _supa_ok_acc, _ = _supabase_status()
+    _archive_header("acc", _supa_ok_acc)
 
-    if st.button("🔍 Run Accuracy Analysis", use_container_width=False):
-        with st.spinner("Fetching historical prices and scoring past predictions — this can take a moment..."):
-            df_all_hist, load_err = _load_all_history()
-            if df_all_hist is not None and not df_all_hist.empty:
-                acc_result, acc_diag = _compute_accuracy(df_all_hist, horizon)
-            else:
-                acc_result, acc_diag = pd.DataFrame(), {"total_rows": 0}
-            st.session_state.accuracy_df = acc_result
-            st.session_state.accuracy_diag = acc_diag
-            st.session_state.accuracy_load_err = load_err
-            st.session_state.accuracy_horizon = horizon
-            st.session_state.accuracy_computed_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    acc_df = st.session_state.get("accuracy_df")
-    acc_diag = st.session_state.get("accuracy_diag", {})
-    acc_computed_at = st.session_state.get("accuracy_computed_at")
-    acc_load_err = st.session_state.get("accuracy_load_err")
-
-    if acc_computed_at:
-        st.caption(
-            f"🕒 Last analyzed: {acc_computed_at} at horizon={st.session_state.get('accuracy_horizon')} — "
-            "click 'Run Accuracy Analysis' again for a fresh result (new data, or a different horizon, "
-            "does not refresh this automatically)."
-        )
-    if acc_load_err:
-        st.error(f"Couldn't load scan history from Supabase for this analysis: {acc_load_err}")
-
-    if acc_df is None:
-        st.info("Click 'Run Accuracy Analysis' to score your recorded scans against actual price action.")
-    elif acc_df.empty:
+    res = st.session_state.get("acc_outcomes")
+    if res is None:
         st.info(
-            "Nothing evaluable yet — either there's no scan history, or not enough real trading days "
-            f"({st.session_state.get('accuracy_horizon', horizon)}) have passed since your earliest scans. "
-            "Check back after the AI Scanner has run for a while."
+            "Click 'Evaluate Matured Predictions' to score every saved scan against real prices at "
+            "1, 3, 5, 10 and 20 trading days."
         )
-        if acc_diag.get("total_rows"):
-            st.caption(
-                f"Diagnostics — {acc_diag['total_rows']} recorded rows: "
-                f"{acc_diag.get('skipped_no_price_data', 0)} had no fetchable price data, "
-                f"{acc_diag.get('skipped_no_entry_day', 0)} had no trading day on/before the scan date, "
-                f"{acc_diag.get('skipped_insufficient_forward', 0)} don't have enough real trading days elapsed yet, "
-                f"{acc_diag.get('skipped_missing_price', 0)} had missing entry/exit prices, "
-                f"{acc_diag.get('evaluated', 0)} evaluated."
-            )
     else:
-        directional = acc_df[acc_df["Predicted"] != "Sideways"]
-        overall_acc = directional["Correct"].mean() * 100 if len(directional) else 0
+        completed, pending = res["completed"], res["pending"]
+        if res.get("load_err"):
+            st.warning(f"History loader note: {res['load_err']}")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Directional Accuracy", f"{overall_acc:.1f}%")
-        c2.metric("Predictions Scored", len(acc_df))
-        c3.metric("Directional Calls", len(directional))
-
-        buy_rows = acc_df[acc_df["Class"].isin(["Buy", "Strong Buy"])]
-        if len(buy_rows):
-            buy_win_rate = (buy_rows["Actual Return %"] > 0).mean() * 100
-            c4.metric("Buy/Strong Buy Win Rate", f"{buy_win_rate:.1f}%")
+        if completed.empty and pending.empty:
+            st.error(
+                "No saved scan history could be loaded, so there is nothing to evaluate. "
+                "Check the storage status on the History tab."
+            )
         else:
-            c4.metric("Buy/Strong Buy Win Rate", "N/A")
+            all_tickers = sorted(
+                (set(completed["Ticker"]) if not completed.empty else set())
+                | (set(pending["Ticker"]) if not pending.empty else set())
+            )
+            hz_labels = [f"{h}D" for h in ACCURACY_HORIZONS]
+            af1, af2 = st.columns([2, 1])
+            sel_t = af1.multiselect("Ticker", all_tickers, placeholder="All tickers", key="acc_f_ticker")
+            sel_hl = af2.multiselect("Forecast horizon", hz_labels, default=hz_labels, key="acc_f_horizon")
+            sel_h = [int(x[:-1]) for x in sel_hl] or list(ACCURACY_HORIZONS)
 
-        if len(acc_df) > 1:
-            corr = acc_df["AI Score"].corr(acc_df["Actual Return %"])
-            mae = (acc_df["Exp Return %"] - acc_df["Actual Return %"]).abs().mean()
-            c5, c6 = st.columns(2)
-            c5.metric("AI Score ↔ Actual Return correlation", f"{corr:+.2f}" if pd.notna(corr) else "N/A")
-            c6.metric("Exp Return % MAE", f"{mae:.2f} pp")
+            def _filt(df):
+                if df.empty:
+                    return df
+                out = df[df["Horizon"].isin(sel_h)]
+                return out[out["Ticker"].isin(sel_t)] if sel_t else out
 
-        st.divider()
-        st.markdown("#### Accuracy by Classification")
-        by_class_rows = []
-        for cls, grp in acc_df.groupby("Class"):
-            grp_dir = grp[grp["Predicted"] != "Sideways"]
-            by_class_rows.append({
-                "Class": cls, "n": len(grp),
-                "Directional Accuracy": round(grp_dir["Correct"].mean() * 100, 1) if len(grp_dir) else None,
-                "Win Rate (actual > 0)": round((grp["Actual Return %"] > 0).mean() * 100, 1),
-            })
-        st.dataframe(
-            pd.DataFrame(by_class_rows).sort_values("n", ascending=False).reset_index(drop=True),
-            use_container_width=True,
-        )
+            comp_f, pend_f = _filt(completed), _filt(pending)
+            n_comp, n_pend = len(comp_f), len(pend_f)
 
-        st.divider()
-        st.markdown("#### All Scored Predictions")
-        st.dataframe(
-            acc_df.sort_values("Date", ascending=False).reset_index(drop=True),
-            use_container_width=True, height=min(80 + 35 * len(acc_df), 500),
-        )
+            pairs = set()
+            if n_comp:
+                pairs |= set(zip(comp_f["Scan Date"], comp_f["Ticker"]))
+            if n_pend:
+                pairs |= set(zip(pend_f["Prediction Date"], pend_f["Ticker"]))
+
+            directional = comp_f[comp_f["Predicted"] != "Sideways"] if n_comp else comp_f
+            dir_acc_txt = f"{directional['Correct'].mean() * 100:.2f}" if len(directional) else "N/A"
+            coverage_txt = f"{n_comp / (n_comp + n_pend) * 100:.2f}" if (n_comp + n_pend) else "N/A"
+
+            waiting = pend_f[pend_f["Maturity Status"] == "Pending"] if n_pend else pend_f
+            if len(waiting):
+                nxt = waiting["Estimated Maturity"].min()
+                next_txt = "Now" if nxt <= datetime.date.today().isoformat() else nxt
+            else:
+                next_txt = "—"
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.markdown(_stat_card("Saved scanner predictions", len(pairs)), unsafe_allow_html=True)
+            k2.markdown(_stat_card("Completed horizon outcomes", n_comp), unsafe_allow_html=True)
+            k3.markdown(_stat_card("Direction accuracy %", dir_acc_txt), unsafe_allow_html=True)
+            k4.markdown(_stat_card("Evaluation coverage %", coverage_txt), unsafe_allow_html=True)
+            k5.markdown(_stat_card("Next evaluation", next_txt), unsafe_allow_html=True)
+
+            if n_comp == 0:
+                first_mat = waiting["Estimated Maturity"].min() if len(waiting) else None
+                st.info(
+                    "No forecast horizon has matured yet, so there is no accuracy to report — this is not an "
+                    "error. A horizon only counts once that many real trading days have closed after the scan"
+                    + (f" (the earliest pending horizon matures around {first_mat})." if first_mat else ".")
+                    + " Click 'Evaluate Matured Predictions' again after that."
+                )
+
+            st.write("")
+            st.subheader("Accuracy by forecast horizon")
+            rows_h = []
+            for h in sel_h:
+                c = comp_f[comp_f["Horizon"] == h] if n_comp else comp_f
+                p = pend_f[pend_f["Horizon"] == h] if n_pend else pend_f
+                d = c[c["Predicted"] != "Sideways"] if len(c) else c
+                rows_h.append({
+                    "Horizon": f"{h}D", "Saved Predictions": len(c) + len(p),
+                    "Completed": len(c), "Pending": len(p),
+                    "Coverage %": round(len(c) / (len(c) + len(p)) * 100, 1) if (len(c) + len(p)) else None,
+                    "Directional Calls": len(d),
+                    "Direction Accuracy %": round(d["Correct"].mean() * 100, 1) if len(d) else None,
+                })
+            df_h = pd.DataFrame(rows_h)
+
+            ch1, ch2 = st.columns(2)
+            fig_acc = go.Figure(go.Bar(
+                x=df_h["Horizon"], y=df_h["Direction Accuracy %"],
+                text=[f"n={n}" for n in df_h["Directional Calls"]], textposition="outside",
+                marker_color="#1E7B4A",
+            ))
+            fig_acc.add_hline(y=50, line_dash="dash", line_color="#8A97AB",
+                              annotation_text="50%", annotation_position="top left")
+            fig_acc.update_layout(
+                title="Direction accuracy · completed outcomes only", template="plotly_white", height=340,
+                yaxis=dict(range=[0, 105], title="Direction Accuracy %"), xaxis_title="Horizon",
+                margin=dict(l=10, r=10, t=50, b=10), paper_bgcolor="rgba(0,0,0,0)",
+            )
+            ch1.plotly_chart(fig_acc, use_container_width=True)
+
+            fig_cov = go.Figure()
+            fig_cov.add_bar(name="Completed", x=df_h["Horizon"], y=df_h["Completed"], marker_color="#1E7B4A")
+            fig_cov.add_bar(name="Pending", x=df_h["Horizon"], y=df_h["Pending"], marker_color="#C5CFDD")
+            fig_cov.update_layout(
+                title="Maturity coverage", barmode="stack", template="plotly_white", height=340,
+                yaxis_title="Forecasts", xaxis_title="Horizon", margin=dict(l=10, r=10, t=50, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            ch2.plotly_chart(fig_cov, use_container_width=True)
+
+            st.caption(
+                "Direction accuracy is the share of matured Bullish/Bearish calls whose realized move (beyond ±1%) "
+                "matched the call. Sideways calls and pending forecasts are excluded from accuracy; pending "
+                "forecasts stay visible in coverage."
+            )
+            st.dataframe(df_h, hide_index=True, use_container_width=True)
+
+            if n_comp:
+                st.subheader("Accuracy by classification")
+                by_class = []
+                for cls, grp in comp_f.groupby("Class"):
+                    g_dir = grp[grp["Predicted"] != "Sideways"]
+                    by_class.append({
+                        "Class": cls, "Completed outcomes": len(grp),
+                        "Direction Accuracy %": round(g_dir["Correct"].mean() * 100, 1) if len(g_dir) else None,
+                        "Win Rate % (actual > 0)": round((grp["Actual Return %"] > 0).mean() * 100, 1),
+                    })
+                st.dataframe(pd.DataFrame(by_class).sort_values("Completed outcomes", ascending=False),
+                             hide_index=True, use_container_width=True)
+
+            st.subheader("Forecast maturity status")
+            st.caption(
+                "Estimated maturity skips weekends; the evaluator uses observed trading days from real price "
+                "history, which remain authoritative around exchange holidays."
+            )
+            if n_pend:
+                st.dataframe(
+                    pend_f.sort_values(["Estimated Maturity", "Ticker", "Horizon"]).reset_index(drop=True),
+                    hide_index=True, use_container_width=True, height=360,
+                )
+            else:
+                st.success("Every saved forecast in this selection has matured.")
+
+            with st.expander("Completed scanner outcomes"):
+                if n_comp:
+                    st.dataframe(
+                        comp_f.sort_values(["Scan Date", "Ticker", "Horizon"], ascending=[False, True, True])
+                        .reset_index(drop=True),
+                        hide_index=True, use_container_width=True, height=420,
+                    )
+                else:
+                    st.caption("No completed outcomes yet.")
+
+            with st.expander("Data diagnostics"):
+                dg = res["diag"]
+                st.caption(
+                    f"{dg.get('total_rows', 0)} saved rows across {res['dates']} date(s) and "
+                    f"{dg.get('tickers', 0)} ticker(s) · {dg.get('no_price_data_rows', 0)} rows had no fetchable "
+                    f"price data · {dg.get('no_entry_day_rows', 0)} rows had no trading day on/before the scan "
+                    f"date · {dg.get('completed', 0)} horizon outcomes completed, {dg.get('pending', 0)} pending."
+                )
 
 # ═══════════════════════════════════════════════════════════
 # TAB 3 — WATCHLIST OVERVIEW
