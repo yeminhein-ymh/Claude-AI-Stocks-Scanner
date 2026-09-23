@@ -300,6 +300,15 @@ def _supabase_status():
             "Supabase isn't configured (SUPABASE_URL / SUPABASE_KEY missing from Streamlit secrets) — "
             "scan history is only kept in temporary storage that resets whenever the app redeploys."
         )
+    key_kind = _supabase_key_kind()
+    if "publishable" in key_kind or "anon" in key_kind:
+        return False, (
+            f"SUPABASE_KEY is a {key_kind} key. Supabase's Row-Level Security blocks that key from reading "
+            "or writing scan_history by default, so every 'save' has actually only gone to a temporary file "
+            "that is wiped on the next redeploy — Supabase itself has been empty this whole time. Fix: in the "
+            "Supabase dashboard go to Settings → API, copy the service_role secret key, and replace SUPABASE_KEY "
+            "in this app's Streamlit Cloud secrets with it, then reboot the app."
+        )
     try:
         resp = requests.get(
             f"{url}/rest/v1/{SUPABASE_TABLE}?select=id&limit=1",
