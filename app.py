@@ -111,62 +111,133 @@ def _supabase_headers(key: str) -> dict:
     return {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
+def _json_safe(v):
+    """numpy scalars aren't JSON-serializable and NaN/inf aren't valid JSON;
+    either one makes the whole batch upsert fail."""
+    if v is None:
+        return None
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+        return None
+    return v
+
+
 def _supabase_save_day(date_str: str, df: pd.DataFrame) -> bool:
+    """Upsert one day's rows. The real outcome (success or the exact error) is
+    kept in session_state['supa_last_save'] so History can show it - a silent
+    failure here is what makes 'saved' history quietly vanish on redeploy."""
     url, key = _supabase_config()
     if not url:
+        st.session_state["supa_last_save"] = "Supabase not configured - saved to temporary local file only."
         return False
     try:
         rows = []
         for _, r in df.iterrows():
-            row = {db_col: r[disp_col] for disp_col, db_col in SUPABASE_COLUMN_MAP.items()}
+            row = {db_col: _json_safe(r[disp_col]) for disp_col, db_col in SUPABASE_COLUMN_MAP.items()}
             row["scan_date"] = date_str
             rows.append(row)
         resp = requests.post(
             f"{url}/rest/v1/{SUPABASE_TABLE}?on_conflict=scan_date,ticker",
-            headers={**_supabase_headers(key), "Prefer": "resolution=merge-duplicates"},
-            json=rows, timeout=10,
+            headers={**_supabase_headers(key), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            json=rows, timeout=15,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            st.session_state["supa_last_save"] = f"FAILED for {date_str} - HTTP {resp.status_code}: {resp.text[:400]}"
+            return False
+        st.session_state["supa_last_save"] = f"OK - {len(rows)} rows upserted for {date_str} (HTTP {resp.status_code})."
         return True
-    except Exception:
+    except Exception as e:
+        st.session_state["supa_last_save"] = f"FAILED for {date_str} - {type(e).__name__}: {e}"
         return False
 
 
-def _supabase_load_dates() -> list:
-    url, key = _supabase_config()
-    if not url:
-        return []
+def _supabase_key_kind() -> str:
+    """Which kind of key is configured - decoded from the key's own payload, the key itself is never shown."""
+    _url, key = _supabase_config()
+    if not key:
+        return "none"
+    if key.startswith("sb_secret_"):
+        return "secret (write-capable)"
+    if key.startswith("sb_publishable_"):
+        return "publishable (read-only under RLS)"
     try:
-        resp = requests.get(
-            f"{url}/rest/v1/{SUPABASE_TABLE}?select=scan_date&order=scan_date.desc",
-            headers=_supabase_headers(key), timeout=10,
-        )
-        resp.raise_for_status()
-        return sorted({row["scan_date"] for row in resp.json()}, reverse=True)
+        import base64
+        payload = key.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return f"{json.loads(base64.urlsafe_b64decode(payload)).get('role', 'unknown')} (JWT)"
     except Exception:
-        return []
+        return "unrecognized format"
 
 
-def _supabase_load_day(date_str: str):
+def _supabase_diagnostics() -> dict:
+    """Uncached, honest read of what Supabase itself holds (row count + distinct dates)."""
     url, key = _supabase_config()
     if not url:
-        return None
+        return {"configured": False}
+    out = {"configured": True, "key_kind": _supabase_key_kind()}
     try:
-        resp = requests.get(
-            f"{url}/rest/v1/{SUPABASE_TABLE}?scan_date=eq.{date_str}&order=ai_score.desc",
-            headers=_supabase_headers(key), timeout=10,
+        r = requests.get(
+            f"{url}/rest/v1/{SUPABASE_TABLE}?select=scan_date&limit=1000",
+            headers={**_supabase_headers(key), "Prefer": "count=exact"}, timeout=10,
         )
-        resp.raise_for_status()
-        records = resp.json()
-        if not records:
-            return None
-        rows = [{disp: rec.get(db) for disp, db in SUPABASE_COLUMN_MAP.items()} for rec in records]
-        df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
-        numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-        return df
-    except Exception:
+        out["read_status"] = r.status_code
+        out["content_range"] = r.headers.get("Content-Range")
+        if r.status_code < 400:
+            out["distinct_dates"] = sorted({x["scan_date"] for x in r.json()}, reverse=True)
+        else:
+            out["read_error"] = r.text[:300]
+    except Exception as e:
+        out["read_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def _supabase_get(path_and_query: str, timeout=10, retries=2):
+    """GET with a couple of short retries. A free-tier Supabase project can be
+    mid-wake-from-pause or the pooler mid-reconnect, which shows up as a
+    timeout or a transient 5xx on the FIRST call of a burst and then behaves
+    normally right after - exactly the shape that made bulk and per-date reads
+    of the same table disagree earlier. Returns (resp_or_None, error_or_None)."""
+    url, key = _supabase_config()
+    if not url:
+        return None, "Supabase not configured"
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(f"{url}/rest/v1/{path_and_query}", headers=_supabase_headers(key), timeout=timeout)
+            if resp.status_code < 500:
+                return resp, None
+            last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+    return None, last_err
+
+
+def _supabase_load_dates(_diag: dict = None) -> list:
+    resp, err = _supabase_get(f"{SUPABASE_TABLE}?select=scan_date&order=scan_date.desc")
+    if resp is None or resp.status_code != 200:
+        if _diag is not None:
+            _diag["dates_error"] = err or (f"HTTP {resp.status_code}: {resp.text[:300]}" if resp is not None else None)
+        return []
+    return sorted({row["scan_date"] for row in resp.json()}, reverse=True)
+
+
+def _supabase_load_day(date_str: str, _diag: dict = None):
+    resp, err = _supabase_get(f"{SUPABASE_TABLE}?scan_date=eq.{date_str}&order=ai_score.desc")
+    if resp is None or resp.status_code != 200:
+        if _diag is not None:
+            _diag[f"day_error_{date_str}"] = err or (f"HTTP {resp.status_code}: {resp.text[:300]}" if resp is not None else None)
         return None
+    records = resp.json()
+    if not records:
+        return None
+    rows = [{disp: rec.get(db) for disp, db in SUPABASE_COLUMN_MAP.items()} for rec in records]
+    df = pd.DataFrame(rows, columns=HISTORY_COLUMNS)
+    numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    return df
 
 
 def _load_history_dates() -> list:
@@ -263,22 +334,17 @@ def _supabase_load_all_history():
     records = []
     offset = 0
     page_size = 1000
-    try:
-        while True:
-            resp = requests.get(
-                f"{url}/rest/v1/{SUPABASE_TABLE}?select=*&order=scan_date.asc"
-                f"&limit={page_size}&offset={offset}",
-                headers=_supabase_headers(key), timeout=15,
-            )
-            if resp.status_code != 200:
-                return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
-            page = resp.json()
-            records.extend(page)
-            if len(page) < page_size:
-                break
-            offset += page_size
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+    while True:
+        resp, err = _supabase_get(
+            f"{SUPABASE_TABLE}?select=*&order=scan_date.asc&limit={page_size}&offset={offset}", timeout=15,
+        )
+        if resp is None or resp.status_code != 200:
+            return None, err or (f"HTTP {resp.status_code}: {resp.text[:300]}" if resp is not None else "unknown error")
+        page = resp.json()
+        records.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
 
     if not records:
         return pd.DataFrame(), None
@@ -305,9 +371,11 @@ def _load_all_history():
 
     # The bulk query failed or came back empty. Rebuild from the same per-date
     # loaders the History tab uses, so the two can never disagree about what's saved.
+    call_diag = {}
+    known_dates = _supabase_load_dates(call_diag)
     frames = []
-    for date_str in _supabase_load_dates():
-        day = _supabase_load_day(date_str)
+    for date_str in known_dates:
+        day = _supabase_load_day(date_str, call_diag)
         if day is not None and not day.empty:
             day = day.copy()
             day["Date"] = date_str
@@ -315,9 +383,9 @@ def _load_all_history():
     if frames:
         note = err or "bulk history query returned no rows; rebuilt from per-date queries"
         return pd.concat(frames, ignore_index=True), note
-    if df is not None:
-        return df, None
 
+    # Supabase holds nothing readable: use the temporary local file, the same
+    # source the History tab falls back to, and say so.
     try:
         with open(HISTORY_FILE, "r") as f:
             data = json.load(f)
@@ -330,7 +398,24 @@ def _load_all_history():
         fallback_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     except (OSError, ValueError):
         fallback_df = pd.DataFrame()
-    return fallback_df, err
+    if not fallback_df.empty:
+        numeric_cols = [c for c in HISTORY_COLUMNS if c not in ("Ticker", "Class", "Trend Stage")]
+        fallback_df[numeric_cols] = fallback_df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+        return fallback_df, err or (
+            "Supabase returned no saved rows, so this used the temporary local file - "
+            "it is wiped on every redeploy."
+        )
+
+    # Genuinely nothing anywhere. If Supabase itself is configured, say exactly
+    # which call(s) failed instead of a bare "no rows" that looks like an empty
+    # table even when known_dates proves rows exist.
+    if known_dates and not frames:
+        detail = "; ".join(f"{k}: {v}" for k, v in call_diag.items()) or "no further detail"
+        return (df if df is not None else fallback_df), (
+            f"Supabase lists {len(known_dates)} saved date(s), but every per-date read failed just now "
+            f"({detail}) - this is very likely a transient Supabase blip, not missing data. Try again."
+        )
+    return (df if df is not None else fallback_df), (err or call_diag.get("dates_error"))
 
 
 def _predicted_direction(bull, bear, side) -> str:
@@ -1002,6 +1087,12 @@ with tabs[1]:
     else:
         st.error(_supa_msg)
 
+    _res_hdr = st.session_state.get("acc_outcomes")
+    if _res_hdr is not None and _res_hdr.get("load_err"):
+        st.warning(f"Last evaluation note: {_res_hdr['load_err']}")
+
+    _resync_payload = None
+
     if not dates_sorted:
         st.info("No scan history yet. The AI Scanner saves each weekday's results here automatically.")
     else:
@@ -1024,6 +1115,7 @@ with tabs[1]:
         else:
             df_day = df_day.sort_values("AI Score", ascending=False).reset_index(drop=True)
             df_day.insert(0, "Rank", df_day.index + 1)
+            _resync_payload = (picked_date, df_day)
 
             hf1, hf2, hf3 = st.columns(3)
             sel_tickers = hf1.multiselect("Ticker", sorted(df_day["Ticker"].dropna().unique()),
@@ -1094,6 +1186,21 @@ with tabs[1]:
                     "Download selected date Excel", day_xlsx, file_name=f"scanner_{picked_date}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="hist_day_xlsx",
                 )
+
+    with st.expander("Storage diagnostics"):
+        st.caption(
+            "Reads Supabase directly, bypassing every cache and fallback above, so you can see exactly what "
+            "the database itself currently holds."
+        )
+        if _resync_payload is not None:
+            _rs_date, _rs_df = _resync_payload
+            if st.button(f"Re-sync {_rs_date} to Supabase", key="hist_resync"):
+                ok = _supabase_save_day(_rs_date, _rs_df)
+                _cached_all_history.clear()
+                _cached_backup_files.clear()
+                (st.success if ok else st.error)(st.session_state.get("supa_last_save", ""))
+        st.caption(f"Last Supabase save this session: {st.session_state.get('supa_last_save', 'no save has run yet')}")
+        st.json(_supabase_diagnostics())
 
 # ═══════════════════════════════════════════════════════════
 # TAB 2 — SIGNAL ACCURACY
